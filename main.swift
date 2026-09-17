@@ -640,7 +640,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else if shouldPaste {
                 self.panel.transcribing()
             } else {
-                self.panel.hide()
+                self.panel.cancelTake()
             }
         }
 

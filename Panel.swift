@@ -11,7 +11,7 @@ enum PanelState { case wave, busy }
 /// in whichever of those two it interrupted.
 enum PillState { case idle, action, rec, mini, busy }
 
-final class WaveView: NSView, NSViewToolTipOwner {
+final class WaveView: NSView {
     var state: PanelState = .wave
     var compact = false                 // pill mode; not cleared by reset()
     var pill: PillState = .idle         // only meaningful while compact
@@ -280,16 +280,6 @@ final class WaveView: NSView, NSViewToolTipOwner {
         return NSRect(x: pillRect.minX + 4, y: pillRect.minY + (pillRect.height - d) / 2, width: d, height: d)
     }
 
-    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
-              userData data: UnsafeMutableRawPointer?) -> String {
-        switch actionButton(at: point) {
-        case 0: return "Settings"
-        case 1: return "Record"
-        case 2: return "Expand"
-        default: return ""
-        }
-    }
-
     /// Pill states never touch the blur: idle is a bare hairline, everything
     /// else is the same black as the notch so the two read as one shape.
     private func drawPill() {
@@ -299,9 +289,11 @@ final class WaveView: NSView, NSViewToolTipOwner {
         // k: how "expanded" the look is. Idle is 0, any black state is 1, and a
         // morph glides between them so the fill and contents crossfade with
         // the shape instead of snapping on the first frame.
-        let toIdle = pill == .idle
+        let toIdle = pill == .idle, fromIdle = morphFromPill == .idle
         let shown: PillState = toIdle ? morphFromPill : pill
-        let k: CGFloat = toIdle ? 1 - morphT : morphT
+        // Only a morph that has idle at one end crossfades; black to black
+        // (rec <-> mini, action -> rec) keeps the fill and contents solid.
+        let k: CGFloat = toIdle ? (fromIdle ? 0 : 1 - morphT) : (fromIdle ? morphT : 1)
         if k < 1 {
             // Translucent capsule. The fill also keeps the interior hit-testable;
             // a fully transparent interior would only hover on the 1pt ring.
@@ -733,6 +725,7 @@ final class WavePanel: NSPanel {
                 invalidateShadow()
             } else {
                 setPill(target, animated: true)
+                orderFrontRegardless()   // something may have stacked above us since
             }
             schedule(fps: 60)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -775,6 +768,7 @@ final class WavePanel: NSPanel {
     }
 
     func transcribing(status: String? = nil) {
+        dismissHint()
         wave.state = .busy
         wave.footerDim = true
         if let status { wave.footerLeft = status }
@@ -782,6 +776,12 @@ final class WavePanel: NSPanel {
         wave.needsDisplay = true
         if compact { setPill(.busy, animated: false) }
         schedule(fps: 30)
+    }
+
+    /// A cancelled take (Esc): the transcription still runs to completion,
+    /// so the pill shows busy until finishTake's hide(); the card just goes.
+    func cancelTake() {
+        if compact { transcribing() } else { hide() }
     }
 
     /// Launch in pill mode: the hairline capsule goes up with nothing running.
@@ -799,6 +799,13 @@ final class WavePanel: NSPanel {
     func setFooterLeft(_ text: String) {
         wave.footerLeft = text
         wave.needsDisplay = true
+        // The pill has no footer; the status rides in the hint under it.
+        guard compact, wave.pill != .idle, wave.pill != .action, !text.isEmpty else { return }
+        let str = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .regular),
+            .foregroundColor: NSColor(calibratedWhite: 1, alpha: 0.95)])
+        let r = wave.pillRect
+        hint.show(str, under: NSPoint(x: frame.minX + r.midX, y: frame.minY + r.minY - 4), parent: self)
     }
 
     private func schedule(fps: Double) {
@@ -814,7 +821,9 @@ final class WavePanel: NSPanel {
         guard isVisible else { return }
         if compact {
             // The pill never leaves the screen; it shrinks back to the outline.
-            wave.reset()
+            // Already there (or on the way): nothing to do. The bars keep
+            // their last frame through the close; pillSettled resets them.
+            if wave.pill == .idle { return }
             wave.footerDim = false
             setPill(.idle, animated: true)
             return
@@ -824,7 +833,9 @@ final class WavePanel: NSPanel {
             ctx.duration = 0.12
             self.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
-            guard let self, self.alphaValue == 0 else { return }   // a new show() won the race
+            guard let self else { return }
+            // A new show() or a chevron click into pill mode won the race.
+            guard self.alphaValue == 0, !self.compact else { self.alphaValue = 1; return }
             self.orderOut(nil)
             self.alphaValue = 1
         })
@@ -851,11 +862,15 @@ final class WavePanel: NSPanel {
         if on {
             wave.pillMini = UserDefaults.standard.bool(forKey: "pillMini")
             wave.pill = pillStateForTake()
+            wave.morphFromPill = wave.pill
             wave.hover = nil
             wave.shape = targetShape
             wave.morphT = 1
+            // A chevron click can land during the card's hide fade; the pill
+            // must come up solid and stay ordered in.
+            alphaValue = 1
+            if !isVisible { orderFrontRegardless() }
         }
-        wave.removeAllToolTips()
         // Hidden was not enough: a behind-window blur view keeps shaping the
         // window with its maskImage even when hidden, and that mask was
         // stretched from a stale radius (pointed, lens-shaped pills). In pill
@@ -878,12 +893,18 @@ final class WavePanel: NSPanel {
         wave.needsDisplay = true
         let next = frame(for: currentSize)
         if animated, isVisible {
+            // While the window itself animates, pill state changes wait
+            // (setPill returns early) and hover is ignored (morphing).
+            toggling = true
+            morphing = on
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.18
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 self.animator().setFrame(next, display: true)
             }, completionHandler: { [weak self] in
                 guard let self else { return }
+                self.toggling = false
+                self.morphing = false
                 self.layoutChevron()
                 self.invalidateShadow()
                 self.syncChevronHover()
@@ -905,6 +926,7 @@ final class WavePanel: NSPanel {
     private var currentSize: NSSize {
         compact ? WaveView.pillBox : WaveView.fullSize
     }
+    private var toggling = false   // card <-> pill window animation in flight
     /// The capsule the current pill state wants, inside pillBox.
     private var targetShape: NSRect { WaveView.pillShape(wave.pill, mini: wave.pillMini) }
     /// The drawn capsule in screen coordinates, for cursor checks.
@@ -956,16 +978,17 @@ final class WavePanel: NSPanel {
         if s == .rec { wave.pillMini = false }
         if s == .mini { wave.pillMini = true }
         wave.hover = nil
-        wave.removeAllToolTips()
-        // No shadow while the shape is moving: the window server recomputes a
-        // shaped shadow every frame and it flickers. morphTick restores it.
+        // Pill mode never carries a window shadow (toggling one mid-morph flickers).
         hasShadow = false
         applyChrome()
         wave.needsDisplay = true
-        // The window stays put at pillBox (a jump if it belongs on another
-        // screen now); only the drawn capsule moves.
-        let box = frame(for: WaveView.pillBox)
-        if frame != box { setFrame(box, display: false) }
+        // Mid card->pill toggle: the state is set; the toggle's completion
+        // morphs into it once the window has landed.
+        if toggling { return }
+        // The window stays put at pillBox; only the drawn capsule moves. Pick
+        // a screen only when coming up, so a take does not follow the mouse
+        // across monitors.
+        if !isVisible || frame.size != WaveView.pillBox { setFrame(frame(for: WaveView.pillBox), display: false) }
         morph(to: targetShape, animated: animated, soft: opening)
     }
 
@@ -1045,8 +1068,8 @@ final class WavePanel: NSPanel {
     /// tooltips and hover highlight for wherever the cursor already is.
     private func pillSettled() {
         invalidateShadow()
-        wave.removeAllToolTips()
         guard compact else { return }
+        if wave.pill == .idle, wave.state != .wave { wave.reset() }
         // Enter/exit events fired mid-morph were ignored (they flickered the
         // bar open and shut); decide from where the cursor actually is now.
         let inside = shapeOnScreen.contains(NSEvent.mouseLocation)
@@ -1147,7 +1170,15 @@ final class WavePanel: NSPanel {
             switch wave.actionButton(at: p) {
             case 0: onSettings?()
             case 1: onRecord?()
-            case 2: setCompact(false, animated: true)
+            case 2:
+                if recordingActive {
+                    setCompact(false, animated: true)
+                } else {
+                    // Nothing to show in the card yet: switch modes and put
+                    // it away; the next take opens as the full card.
+                    setCompact(false, animated: false)
+                    hide()
+                }
             default: break
             }
         case .rec:
