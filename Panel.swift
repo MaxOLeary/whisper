@@ -43,12 +43,12 @@ final class WaveView: NSView {
     static let actionPitch: CGFloat = 40
     static let actionHit: CGFloat = 30
     static let topInset: CGFloat = 5    // expanded pills float a hair below the top edge
-    static let idleInset: CGFloat = 8
+    static let idleInset: CGFloat = 3     // idle rides right under the top edge
     static let coral = NSColor(srgbRed: 0xef / 255, green: 0x5b / 255, blue: 0x4a / 255, alpha: 1)
 
     static func pillSize(_ s: PillState, mini: Bool) -> NSSize {
         switch s {
-        case .idle: return NSSize(width: 44, height: 8)
+        case .idle: return NSSize(width: 44, height: 6)
         case .action: return NSSize(width: 116, height: 38)
         case .rec: return NSSize(width: 116, height: 38)
         case .mini: return NSSize(width: 54, height: 22)
@@ -298,27 +298,34 @@ final class WaveView: NSView {
         return NSRect(x: pillRect.minX + 4, y: pillRect.minY + (pillRect.height - d) / 2, width: d, height: d)
     }
 
-    /// Pill states never touch the blur: idle is a bare hairline, everything
-    /// else is the same black as the notch so the two read as one shape.
+    /// How much of the idle look is showing: 1 with the outline fully up, 0
+    /// once a black state has taken over, gliding through a morph so the
+    /// fill, ring, glass and contents crossfade with the shape instead of
+    /// snapping on the first frame. Only a morph with idle at one end
+    /// crossfades; black to black (rec <-> mini, action -> rec) stays solid.
+    var idleLook: CGFloat {
+        let toIdle = pill == .idle, fromIdle = morphFromPill == .idle
+        let k: CGFloat = toIdle ? (fromIdle ? 0 : 1 - morphT) : (fromIdle ? morphT : 1)
+        return 1 - k
+    }
+
+    /// Pill states never touch the card's blur: idle is a faint ring over its
+    /// own sliver of glass (IdleGlassView, below this view), everything else
+    /// is the same black as the notch so the two read as one shape.
     private func drawPill() {
         let b = pillRect
         let r = radius
         let capsule = NSBezierPath(roundedRect: b, xRadius: r, yRadius: r)
-        // k: how "expanded" the look is. Idle is 0, any black state is 1, and a
-        // morph glides between them so the fill and contents crossfade with
-        // the shape instead of snapping on the first frame.
-        let toIdle = pill == .idle, fromIdle = morphFromPill == .idle
-        let shown: PillState = toIdle ? morphFromPill : pill
-        // Only a morph that has idle at one end crossfades; black to black
-        // (rec <-> mini, action -> rec) keeps the fill and contents solid.
-        let k: CGFloat = toIdle ? (fromIdle ? 0 : 1 - morphT) : (fromIdle ? morphT : 1)
+        let k = 1 - idleLook
+        let shown: PillState = pill == .idle ? morphFromPill : pill
         if k < 1 {
-            // Translucent capsule. The fill also keeps the interior hit-testable;
-            // a fully transparent interior would only hover on the 1pt ring.
-            NSColor(calibratedWhite: 1, alpha: 0.18 * (1 - k)).setFill(); capsule.fill()
+            // A whisper of white over the glass. The fill also keeps the
+            // interior hit-testable; a fully transparent interior would only
+            // hover on the 1pt ring.
+            NSColor(calibratedWhite: 1, alpha: 0.06 * (1 - k)).setFill(); capsule.fill()
             let ring = NSBezierPath(roundedRect: b.insetBy(dx: 0.5, dy: 0.5),
                                     xRadius: r - 0.5, yRadius: r - 0.5)
-            NSColor(calibratedWhite: 1, alpha: 0.35 * (1 - k)).setStroke(); ring.lineWidth = 1; ring.stroke()
+            NSColor(calibratedWhite: 1, alpha: 0.16 * (1 - k)).setStroke(); ring.lineWidth = 1; ring.stroke()
         }
         if k <= 0 || shown == .idle { return }
         capsule.addClip()
@@ -526,6 +533,55 @@ final class PillEffectView: NSVisualEffectView {
     }
 }
 
+/// Glass behind the idle capsule, so the outline reads as a sliver of
+/// whatever is behind it instead of a flat grey bar. macOS 26 gets real
+/// glass; older systems a behind-window blur clipped to the same capsule.
+/// Sits under the wave in pill mode only; the wave draws the ring on top.
+final class IdleGlassView: NSView {
+    private let glass: NSView
+    private var maskRadius: CGFloat = -1
+
+    override init(frame: NSRect) {
+        if #available(macOS 26.0, *) {
+            let g = NSGlassEffectView(frame: frame)
+            g.cornerRadius = frame.height / 2
+            glass = g
+        } else {
+            let e = NSVisualEffectView(frame: frame)
+            e.material = .hudWindow
+            e.blendingMode = .behindWindow
+            e.state = .active
+            e.appearance = NSAppearance(named: .vibrantDark)
+            glass = e
+        }
+        super.init(frame: frame)
+        wantsLayer = true
+        glass.frame = bounds
+        glass.autoresizingMask = [.width, .height]
+        addSubview(glass)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// Clicks go to the wave above; the glass is decoration.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    /// Follow the live capsule: `look` is WaveView.idleLook, so the glass
+    /// fades out as a black state grows over it.
+    func follow(shape: NSRect, radius: CGFloat, look: CGFloat) {
+        frame = shape
+        alphaValue = look
+        isHidden = look <= 0
+        guard radius != maskRadius else { return }
+        maskRadius = radius
+        if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView {
+            g.cornerRadius = radius
+        } else if let e = glass as? NSVisualEffectView {
+            e.maskImage = WavePanel.roundedMask(radius: radius)
+        }
+    }
+}
+
 /// Clear content view the blur and the wave both sit in, so pill mode can
 /// hide the blur while the wave keeps drawing. Clicks outside the rounded
 /// shape fall through, same as the effect view when it was the content view.
@@ -539,11 +595,11 @@ final class PillHostView: NSView {
     /// radius: an eye shape, and the idle ring showed as two lines). Pin
     /// every subview to the host's bounds on each layout pass instead.
     override func resizeSubviews(withOldSize oldSize: NSSize) {
-        for v in subviews { v.frame = bounds }
+        for v in subviews where !(v is IdleGlassView) { v.frame = bounds }
     }
     override func layout() {
         super.layout()
-        for v in subviews where v.frame != bounds { v.frame = bounds }
+        for v in subviews where !(v is IdleGlassView) && v.frame != bounds { v.frame = bounds }
     }
 
     override func updateTrackingAreas() {
@@ -607,6 +663,7 @@ final class WavePanel: NSPanel {
     let wave = WaveView()
     private let effect = PillEffectView()
     private let host = PillHostView()
+    private let idleGlass = IdleGlassView(frame: WaveView.pillShape(.idle, mini: false))
     private let chevron = ChevronButton(frame: .zero)
     private var timer: Timer?
     private var compact = false
@@ -844,10 +901,15 @@ final class WavePanel: NSPanel {
         if on {
             effect.maskImage = nil
             effect.removeFromSuperview()
-        } else if effect.superview == nil {
-            effect.frame = host.bounds
-            host.addSubview(effect, positioned: .below, relativeTo: wave)
+            if idleGlass.superview == nil { host.addSubview(idleGlass, positioned: .below, relativeTo: wave) }
+        } else {
+            idleGlass.removeFromSuperview()
+            if effect.superview == nil {
+                effect.frame = host.bounds
+                host.addSubview(effect, positioned: .below, relativeTo: wave)
+            }
         }
+        syncIdleGlass()
         chevron.isHidden = on
         wave.layer?.masksToBounds = !on
         hasShadow = !on   // pill mode never carries a window shadow (toggling it flickers)
@@ -883,6 +945,7 @@ final class WavePanel: NSPanel {
             layoutChevron()
             invalidateShadow()
             syncChevronHover()
+            syncIdleGlass()   // the window is at pillBox now; the pre-resize sync hid the glass
         }
     }
 
@@ -900,6 +963,15 @@ final class WavePanel: NSPanel {
     private func mouseInWave() -> NSPoint { wave.convert(mouseInWindow, from: nil) }
     /// Is the cursor over the drawn capsule (not just the bigger window)?
     private var cursorInPill: Bool { wave.pillRect.contains(mouseInWave()) }
+
+    /// Keep the idle glass under the drawn capsule, fading with the idle look.
+    private func syncIdleGlass() {
+        guard compact, idleGlass.superview != nil else { return }
+        // Only once the window sits at pillBox: before that pillRect is the
+        // whole (card-sized) bounds, and the glass would land as a big blob.
+        let settled = !toggling && frame.size == WaveView.pillBox
+        idleGlass.follow(shape: wave.pillRect, radius: wave.radius, look: settled ? wave.idleLook : 0)
+    }
 
     private func applyChrome() {
         if compact {
@@ -983,6 +1055,7 @@ final class WavePanel: NSPanel {
             wave.morphT = 1
             wave.shape = next
             wave.needsDisplay = true
+            syncIdleGlass()
             pillSettled()
         }
     }
@@ -1022,6 +1095,7 @@ final class WavePanel: NSPanel {
         wave.morphT = e
         wave.shape = t >= 1 ? morphTo : f
         wave.needsDisplay = true
+        syncIdleGlass()
         if t >= 1 {
             link.isPaused = true
             wave.morphT = 1
@@ -1222,7 +1296,7 @@ final class WavePanel: NSPanel {
 
     /// Stretchable rounded-rect mask. capInsets of `radius` keep the corners
     /// unscaled so the pill stays circular at any size.
-    private static func roundedMask(radius: CGFloat) -> NSImage {
+    static func roundedMask(radius: CGFloat) -> NSImage {
         let img = NSImage(size: NSSize(width: radius * 2, height: radius * 2), flipped: false) { rect in
             NSColor.black.set()
             NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
