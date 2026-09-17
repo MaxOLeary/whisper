@@ -367,8 +367,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ) { [weak self] _ in self?.settings.show(page: .home) }
         capture.onLevel = { [weak self] level in self?.panel.push(level: level) }
         // Notch pill buttons. toggleRecording already picks meeting vs dictation stop.
-        panel.onRecord = { [weak self] in self?.toggleRecording() }
-        panel.onStop = { [weak self] in self?.toggleRecording() }
+        panel.onToggleRecord = { [weak self] in self?.toggleRecording() }
         panel.onSettings = { [weak self] in self?.openSettings() }
         panel.recordHotkey = cfg.recordHotkey
         // Pill mode: the idle outline is always on screen, from launch.

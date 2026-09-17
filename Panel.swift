@@ -18,8 +18,7 @@ final class WaveView: NSView {
     var pillMini = false                // last of rec/mini; busy keeps that shape
     var hover: Int?                     // action-bar button under the cursor: 0 gear, 1 record, 2 expand
     var morphT: CGFloat = 1             // 0..1 progress of the current pill morph (1 = settled)
-    var morphFromPill: PillState = .idle    // shape the morph started from; drawn while closing to idle
-    private var contentK: CGFloat = 1       // 0..1 arrival of the pill contents during a morph
+    var morphFromPill: PillState = .idle    // state the morph started from; its look is drawn while closing to idle
     var currentLevel: CGFloat = 0       // latest mic level from the tap
     private var smoothLevel: CGFloat = 0    // eased mic level; the bars follow this, not the raw tap
     private var bars: [CGFloat] = []        // scrolled history, oldest first
@@ -88,6 +87,11 @@ final class WaveView: NSView {
     private var slots: Int {
         compact ? (pillMini ? Self.miniSlots : Self.recSlots) : max(2, Int(waveArea.width / Self.pitch))
     }
+    /// The eased mic level shaped for a bar height (0...1).
+    private var liveLevel: CGFloat { min(1, pow(smoothLevel * 1.35, 0.9)) }
+    // The two SF Symbols on the action bar, resolved once.
+    private lazy var gearIcon = symbol("gearshape", size: 15, weight: .medium)
+    private lazy var expandIcon = symbol("arrow.up.left.and.arrow.down.right", size: 13)
 
     private static var iconCache: [String: NSImage] = [:]
     private func symbol(_ name: String, size: CGFloat = 12,
@@ -138,18 +142,18 @@ final class WaveView: NSView {
             ticks += 1
             // Pill: one bar every 3rd frame (20/s); the card keeps its 12/s.
             if ticks % (compact ? 3 : 5) == 0 {
-                bars.append(min(1, pow(smoothLevel * 1.35, 0.9)))
+                bars.append(liveLevel)
                 if bars.count > slots { bars.removeFirst(bars.count - slots) }
             }
         case .busy:
             phase += 1.0 / 30
         }
         // Only the bars move frame to frame; leave the card and footer alone.
-        setNeedsDisplay(compact ? bounds : waveArea.insetBy(dx: 0, dy: -4))
+        setNeedsDisplay(compact ? pillRect : waveArea.insetBy(dx: 0, dy: -4))
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        let path = NSBezierPath(roundedRect: compact ? pillRect : bounds, xRadius: radius, yRadius: radius)
+        let path = NSBezierPath(roundedRect: pillRect, xRadius: radius, yRadius: radius)
         if !path.contains(point) { return nil }
         return super.hitTest(point)
     }
@@ -186,9 +190,8 @@ final class WaveView: NSView {
         if let img = symbol("mic.fill", size: 13) {
             // Draw at the symbol's own size. A 15x14 dest squashed mic.fill
             // (taller than wide) into a short wide blob.
-            let s = img.size
-            let r = NSRect(x: footer.minX + 14, y: (footer.midY - s.height / 2).rounded(),
-                           width: s.width, height: s.height)
+            var r = centered(img.size, at: NSPoint(x: 0, y: footer.midY))
+            r.origin.x = footer.minX + 14
             drawTinted(img, in: r, color: dim)
         }
         (footerLeft as NSString).draw(at: NSPoint(x: footer.minX + 38, y: footer.midY - 8),
@@ -221,15 +224,31 @@ final class WaveView: NSView {
     private func drawBars() {
         let area = waveArea
         let n = slots
+        let (levels, busyAlpha) = self.levels(n: n)
+        let maxH = area.height
+        let minH: CGFloat = 1.6
+        drawBarRow(n: n, pitch: Self.pitch, barW: Self.barW, centerX: area.midX, midY: area.midY,
+                   height: { max(minH, levels[$0] * maxH) },
+                   alpha: { i in
+                       let lv = levels[i]
+                       return lv * maxH <= minH ? 0.30
+                           : state == .busy ? busyAlpha[i]
+                           : 0.40 + 0.60 * min(1, lv * 1.5)
+                   })
+    }
+
+    /// Bar heights 0...1 plus per-bar alpha for the busy ripple. Shared by
+    /// the card and the pill so rec and busy look like the big wave shrunk.
+    private func levels(n: Int) -> ([CGFloat], [CGFloat]) {
         var levels = [CGFloat](repeating: 0, count: n)
-        var busyAlpha = [CGFloat](repeating: 0.65, count: n)   // brighter on the crests
+        var alphas = [CGFloat](repeating: 1, count: n)
         switch state {
         case .wave:
             // Right-aligned history plus a live bar hugging the right edge.
             let recent = bars.suffix(n - 1)
             let start = n - 1 - recent.count
             for (i, v) in recent.enumerated() { levels[start + i] = v }
-            levels[n - 1] = min(1, pow(smoothLevel * 1.35, 0.9))
+            levels[n - 1] = liveLevel
         case .busy:
             // Ripple: one long, gentle sine sliding right to left, tapered at
             // both ends so it fades into the edges. `+ phase` is what makes it
@@ -239,31 +258,30 @@ final class WaveView: NSView {
                 let env = pow(sin(.pi * x), 0.6)
                 let s = 0.5 + 0.5 * sin(2 * .pi * (x * 2.2 + phase * 0.9))
                 levels[i] = CGFloat(0.08 + 0.55 * env * s)
-                busyAlpha[i] = CGFloat(0.45 + 0.35 * s)
+                alphas[i] = CGFloat(0.45 + 0.35 * s)
             }
         }
-        let mid = area.midY
-        let maxH = area.height
-        let pitch: CGFloat = compact ? area.width / CGFloat(n) : Self.pitch
-        let barW: CGFloat = compact ? 2.4 : Self.barW
-        let minH: CGFloat = compact ? 2.4 : 1.6
+        return (levels, alphas)
+    }
+
+    /// One row of `n` rounded bars on a pitch, centered on `centerX`, each
+    /// mirrored about `midY`. The card wave, the rec ticker and the mini
+    /// bars are all this with different height/alpha rules.
+    private func drawBarRow(n: Int, pitch: CGFloat, barW: CGFloat, centerX: CGFloat, midY: CGFloat,
+                            height: (Int) -> CGFloat, alpha: (Int) -> CGFloat) {
         let totalW = CGFloat(n) * pitch - (pitch - barW)
-        let x0 = area.midX - totalW / 2
+        let x0 = centerX - totalW / 2
         for i in 0..<n {
-            let lv = levels[i]
-            let h = max(minH, lv * maxH)
-            let alpha: CGFloat = h <= minH ? 0.30
-                : state == .busy ? busyAlpha[i]
-                : 0.40 + 0.60 * min(1, lv * 1.5)
-            NSColor(calibratedWhite: 1, alpha: alpha).setFill()
-            let r = NSRect(x: x0 + CGFloat(i) * pitch, y: mid - h / 2, width: barW, height: h)
-            NSBezierPath(roundedRect: r, xRadius: barW / 2, yRadius: barW / 2).fill()
+            let h = height(i)
+            NSColor(calibratedWhite: 1, alpha: alpha(i)).setFill()
+            NSBezierPath(roundedRect: NSRect(x: x0 + CGFloat(i) * pitch, y: midY - h / 2, width: barW, height: h),
+                         xRadius: barW / 2, yRadius: barW / 2).fill()
         }
     }
 
     // MARK: Pill
 
-    /// Hit target `i` (0 gear, 1 record, 2 expand): 22pt squares 34pt apart, centered.
+    /// Hit target `i` (0 gear, 1 record, 2 expand): 30pt discs 40pt apart, centered.
     func actionButtonRect(_ i: Int) -> NSRect {
         let s = Self.actionHit
         return NSRect(x: pillRect.midX + CGFloat(i - 1) * Self.actionPitch - s / 2,
@@ -307,12 +325,11 @@ final class WaveView: NSView {
         NSColor(white: 0.04, alpha: k).setFill(); b.fill()
         // Contents arrive once the shape has room for them.
         let contentAlpha = max(0, min(1, (k - 0.35) / 0.65))
-        contentK = contentAlpha
         if contentAlpha <= 0 { return }
         NSGraphicsContext.current?.cgContext.setAlpha(contentAlpha)
         switch shown {
         case .action:
-            drawActionBar()
+            drawActionBar(arrival: contentAlpha)
         case .rec:
             drawDisc(busy: false); drawTicker()
         case .mini:
@@ -324,14 +341,15 @@ final class WaveView: NSView {
         }
     }
 
-    /// Settings / Record / Expand. The hovered one is full white and 10% bigger.
-    private func drawActionBar() {
+    /// Settings / Record / Expand. The hovered one is full white on a lit disc.
+    /// `arrival` 0...1: the icons scale 0.8 -> 1 about the bar's center as they fade in.
+    private func drawActionBar(arrival: CGFloat) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        // Icons scale 0.8 -> 1 about the bar's center as they fade in.
-        let grow = 0.8 + 0.2 * contentK
-        ctx.translateBy(x: pillRect.midX, y: pillRect.midY)
+        let b = pillRect
+        let grow = 0.8 + 0.2 * arrival
+        ctx.translateBy(x: b.midX, y: b.midY)
         ctx.scaleBy(x: grow, y: grow)
-        ctx.translateBy(x: -pillRect.midX, y: -pillRect.midY)
+        ctx.translateBy(x: -b.midX, y: -b.midY)
         for i in 0..<3 {
             let hot = hover == i
             let color = NSColor(calibratedWhite: 1, alpha: hot ? 1 : 0.92)
@@ -345,15 +363,11 @@ final class WaveView: NSView {
             }
             switch i {
             case 0:
-                if let img = symbol("gearshape", size: 15, weight: .medium) {
-                    drawTinted(img, in: centered(img.size, at: c), color: color)
-                }
+                if let img = gearIcon { drawTinted(img, in: centered(img.size, at: c), color: color) }
             case 1:
                 drawGlyph(center: c, size: 16, color: color)
             default:
-                if let img = symbol("arrow.up.left.and.arrow.down.right", size: 13) {
-                    drawTinted(img, in: centered(img.size, at: c), color: color)
-                }
+                if let img = expandIcon { drawTinted(img, in: centered(img.size, at: c), color: color) }
             }
             ctx.restoreGState()
         }
@@ -390,67 +404,33 @@ final class WaveView: NSView {
                   color: busy ? NSColor(calibratedWhite: 1, alpha: 0.55) : Self.coral)
     }
 
-    /// Bar heights 0...1 for the pill plus per-bar alpha for the busy ripple.
-    /// Same math as the card so rec and busy look like the big wave shrunk.
-    private func pillLevels(n: Int) -> ([CGFloat], [CGFloat]) {
-        var levels = [CGFloat](repeating: 0, count: n)
-        var alphas = [CGFloat](repeating: 1, count: n)
-        switch state {
-        case .wave:
-            let recent = bars.suffix(n - 1)
-            let start = n - 1 - recent.count
-            for (i, v) in recent.enumerated() { levels[start + i] = v }
-            levels[n - 1] = min(1, pow(smoothLevel * 1.35, 0.9))
-        case .busy:
-            for i in 0..<n {
-                let x = Double(i) / Double(n - 1)
-                let env = pow(sin(.pi * x), 0.6)
-                let s = 0.5 + 0.5 * sin(2 * .pi * (x * 2.2 + phase * 0.9))
-                levels[i] = CGFloat(0.08 + 0.55 * env * s)
-                alphas[i] = CGFloat(0.45 + 0.35 * s)
-            }
-        }
-        return (levels, alphas)
-    }
-
     /// Rec ticker, centered in the width right of the disc. Alpha ramps
     /// 45% -> 100% left to right so the newest bar is the brightest.
     private func drawTicker() {
         let n = Self.recSlots
-        let pitch = Self.pitch, barW = Self.barW
+        let b = pillRect
         let minH: CGFloat = 2, maxH: CGFloat = 18
-        let totalW = CGFloat(n) * pitch - (pitch - barW)
-        let x0 = (discRect.maxX + pillRect.maxX) / 2 - totalW / 2
-        let mid = pillRect.midY
-        let (levels, alphas) = pillLevels(n: n)
-        for i in 0..<n {
-            let h = max(minH, levels[i] * maxH)
-            let a = state == .busy ? alphas[i] : 0.45 + 0.55 * CGFloat(i) / CGFloat(n - 1)
-            NSColor(calibratedWhite: 1, alpha: a).setFill()
-            NSBezierPath(roundedRect: NSRect(x: x0 + CGFloat(i) * pitch, y: mid - h / 2, width: barW, height: h),
-                         xRadius: barW / 2, yRadius: barW / 2).fill()
-        }
+        let (levels, alphas) = self.levels(n: n)
+        drawBarRow(n: n, pitch: Self.pitch, barW: Self.barW, centerX: (discRect.maxX + b.maxX) / 2, midY: b.midY,
+                   height: { max(minH, levels[$0] * maxH) },
+                   alpha: { state == .busy ? alphas[$0] : 0.45 + 0.55 * CGFloat($0) / CGFloat(n - 1) })
     }
 
     /// Mini: six live bars in a bell (middle tallest) driven by the eased
     /// level, not history. Busy runs the ripple across the same six.
     private func drawMiniBars() {
         let n = Self.miniSlots
-        let pitch: CGFloat = 4, barW: CGFloat = 2
+        let b = pillRect
         let minH: CGFloat = 2, maxH: CGFloat = 12
-        let totalW = CGFloat(n) * pitch - (pitch - barW)
-        let x0 = pillRect.midX - totalW / 2
-        let mid = pillRect.midY
-        let live = min(1, pow(smoothLevel * 1.35, 0.9))
-        let (ripple, alphas) = pillLevels(n: n)
-        for i in 0..<n {
-            let bell = CGFloat(sin(.pi * (Double(i) + 0.5) / Double(n)))
-            let lv = state == .busy ? ripple[i] : 0.15 + 0.85 * live * bell
-            let h = max(minH, lv * maxH)
-            NSColor(calibratedWhite: 1, alpha: state == .busy ? alphas[i] : 1).setFill()
-            NSBezierPath(roundedRect: NSRect(x: x0 + CGFloat(i) * pitch, y: mid - h / 2, width: barW, height: h),
-                         xRadius: barW / 2, yRadius: barW / 2).fill()
-        }
+        let live = liveLevel
+        let (ripple, alphas) = state == .busy ? levels(n: n) : ([], [])
+        drawBarRow(n: n, pitch: 4, barW: 2, centerX: b.midX, midY: b.midY,
+                   height: { i in
+                       let bell = CGFloat(sin(.pi * (Double(i) + 0.5) / Double(n)))
+                       let lv = state == .busy ? ripple[i] : 0.15 + 0.85 * live * bell
+                       return max(minH, lv * maxH)
+                   },
+                   alpha: { state == .busy ? alphas[$0] : 1 })
     }
 
 }
@@ -538,7 +518,7 @@ final class HintBackground: NSView {
 /// Frosted card. maskImage clips the blur; hitTest still uses the square
 /// bounds, so corners would eat clicks on the tabs under a compact pill.
 final class PillEffectView: NSVisualEffectView {
-    var radius: CGFloat = WaveView.radius
+    let radius: CGFloat = WaveView.radius
     override func hitTest(_ point: NSPoint) -> NSView? {
         let path = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
         if !path.contains(point) { return nil }
@@ -581,7 +561,7 @@ final class PillHostView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         let r = shape?.radius ?? WaveView.radius
         let local = superview.map { convert(point, from: $0) } ?? point
-        let b = (shape?.compact ?? false) ? (shape?.pillRect ?? bounds) : bounds
+        let b = shape?.pillRect ?? bounds
         if !NSBezierPath(roundedRect: b, xRadius: r, yRadius: r).contains(local) { return nil }
         return super.hitTest(point)
     }
@@ -631,7 +611,13 @@ final class WavePanel: NSPanel {
     private var timer: Timer?
     private var compact = false
     private var mouseDownCompact = false
-    private var recordingActive = false     // show() .. hide(); decides where pill mode lands
+    /// show() .. hide(): the tick timer runs exactly for a take. Decides where pill mode lands.
+    private var recordingActive: Bool { timer != nil }
+    /// Last of rec / mini, so the next take opens in the shape it was left in.
+    private var pillMiniPref: Bool {
+        get { UserDefaults.standard.bool(forKey: "pillMini") }
+        set { UserDefaults.standard.set(newValue, forKey: "pillMini") }
+    }
 
     /// True when there is something on screen worth an Esc: the full card,
     /// or a pill in a take state. The always-on idle outline and the hover
@@ -640,9 +626,9 @@ final class WavePanel: NSPanel {
         isVisible && !(compact && (wave.pill == .idle || wave.pill == .action))
     }
 
-    // Pill buttons, wired by main.swift. Unset closures are a no-op.
-    var onRecord: (() -> Void)?
-    var onStop: (() -> Void)?
+    // Pill buttons, wired by main.swift. Unset closures are a no-op. Record
+    // and the rec disc (Stop) are one toggle; the app decides what stop means.
+    var onToggleRecord: (() -> Void)?
     var onSettings: (() -> Void)?
     /// Shown in the Record hint ("Record  ⌥ Space"); main.swift keeps it current.
     var recordHotkey = ""
@@ -706,59 +692,34 @@ final class WavePanel: NSPanel {
     }
 
     func show(mode: Mode, hotkey: String, footer: String? = nil, closeLabel: String = "Close") {
-        dismissHint()
         wave.reset()
         wave.footerDim = false
         wave.footerLeft = footer ?? (mode == .cleanup ? "Cleanup" : "Whisper")
         wave.footerRight = [("Stop", nil)] + keycaps(hotkey) + [(closeLabel, "esc")]
-        recordingActive = true
+        schedule(fps: 60)   // the running timer is what marks the take active
         if UserDefaults.standard.bool(forKey: "panelCompact") {
             // Pill mode: morph in place from idle (or whatever shape is up)
             // instead of fading a fresh window in.
             if !compact { setCompact(true, animated: false) }
-            let target: PillState = UserDefaults.standard.bool(forKey: "pillMini") ? .mini : .rec
-            collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-            if !isVisible {
-                alphaValue = 1
-                setPill(target, animated: false)
-                orderFrontRegardless()
-                invalidateShadow()
-            } else {
-                setPill(target, animated: true)
-                orderFrontRegardless()   // something may have stacked above us since
-            }
-            schedule(fps: 60)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                guard let self, self.isVisible else { return }
-                self.place()
-            }
-            return
-        }
-        // Size before place/orderFront so the first frame is already compact
-        // when that's the saved mode (no 428x120 flash then shrink).
-        setCompact(UserDefaults.standard.bool(forKey: "panelCompact"), animated: false)
-        wave.needsDisplay = true
-        // Re-assert "show on every Space" each time. The window server can
-        // drop this tag (seen after a sleep/wake, or after the card was
-        // dragged) and pin the panel to one Space, so the card only appeared
-        // on a desktop the user was not looking at while dictation kept
-        // working. Setting it again right before ordering front re-tags it.
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        // The card fades in quickly rather than popping.
-        if !isVisible {
-            alphaValue = 0
-            orderFrontRegardless()
-            invalidateShadow()
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.13
-                self.animator().alphaValue = 1
-            }
-        } else {
             alphaValue = 1
-            orderFrontRegardless()
-            invalidateShadow()
+            setPill(pillStateForTake(), animated: isVisible)
+            bringUp()
+        } else {
+            // Size before place/orderFront so the first frame is already the
+            // saved mode (no 428x120 flash then shrink).
+            setCompact(false, animated: false)
+            wave.needsDisplay = true
+            // The card fades in quickly rather than popping.
+            let fadeIn = !isVisible
+            alphaValue = fadeIn ? 0 : 1
+            bringUp()
+            if fadeIn {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.13
+                    self.animator().alphaValue = 1
+                }
+            }
         }
-        schedule(fps: 60)
         // Right after a wake the window server can drop the panel somewhere
         // stale; one more place() after things settle brings it back.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -767,8 +728,17 @@ final class WavePanel: NSPanel {
         }
     }
 
+    /// Order front, re-tagging "show on every Space" first. The window server
+    /// can drop that tag (seen after a sleep/wake, or after the card was
+    /// dragged) and pin the panel to one Space, so the card only appeared on
+    /// a desktop the user was not looking at while dictation kept working.
+    private func bringUp() {
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        orderFrontRegardless()
+        if !compact { invalidateShadow() }
+    }
+
     func transcribing(status: String? = nil) {
-        dismissHint()
         wave.state = .busy
         wave.footerDim = true
         if let status { wave.footerLeft = status }
@@ -787,11 +757,8 @@ final class WavePanel: NSPanel {
     /// Launch in pill mode: the hairline capsule goes up with nothing running.
     func showIdle() {
         guard !recordingActive else { return }
-        if compact { setPill(.idle, animated: false) } else { setCompact(true, animated: false) }
-        alphaValue = 1
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        orderFrontRegardless()
-        invalidateShadow()
+        setCompact(true, animated: false)   // lands on idle: no take is running
+        bringUp()
     }
 
     /// Busy-state progress ("Transcribing…", "Loading model…"). Tick only
@@ -801,30 +768,29 @@ final class WavePanel: NSPanel {
         wave.needsDisplay = true
         // The pill has no footer; the status rides in the hint under it.
         guard compact, wave.pill != .idle, wave.pill != .action, !text.isEmpty else { return }
-        let str = NSAttributedString(string: text, attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: .regular),
-            .foregroundColor: NSColor(calibratedWhite: 1, alpha: 0.95)])
-        let r = wave.pillRect
-        hint.show(str, under: NSPoint(x: frame.minX + r.midX, y: frame.minY + r.minY - 4), parent: self)
+        hint.show(hintRun(text), under: hintAnchor(x: wave.pillRect.midX), parent: self)
+    }
+
+    /// A repeating main-thread timer that keeps firing through menu tracking.
+    private func repeating(_ interval: TimeInterval, _ body: @escaping () -> Void) -> Timer {
+        let t = Timer(timeInterval: interval, repeats: true) { _ in body() }
+        RunLoop.main.add(t, forMode: .common)
+        return t
     }
 
     private func schedule(fps: Double) {
         timer?.invalidate()
-        let t = Timer(timeInterval: 1.0 / fps, repeats: true) { [weak self] _ in self?.wave.tick() }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        timer = repeating(1.0 / fps) { [weak self] in self?.wave.tick() }
     }
 
     func hide() {
         timer?.invalidate(); timer = nil
-        recordingActive = false
         guard isVisible else { return }
         if compact {
             // The pill never leaves the screen; it shrinks back to the outline.
             // Already there (or on the way): nothing to do. The bars keep
             // their last frame through the close; pillSettled resets them.
             if wave.pill == .idle { return }
-            wave.footerDim = false
             setPill(.idle, animated: true)
             return
         }
@@ -850,8 +816,7 @@ final class WavePanel: NSPanel {
     }
 
     private func setCompact(_ on: Bool, animated: Bool) {
-        dismissHint()
-        hoverWatch?.invalidate(); hoverWatch = nil
+        stopHover()
         compact = on
         wave.compact = on
         UserDefaults.standard.set(on, forKey: "panelCompact")
@@ -860,7 +825,7 @@ final class WavePanel: NSPanel {
         // the live radius during a morph; the layer's would not). Where it
         // lands depends on whether a take is running.
         if on {
-            wave.pillMini = UserDefaults.standard.bool(forKey: "pillMini")
+            wave.pillMini = pillMiniPref
             wave.pill = pillStateForTake()
             wave.morphFromPill = wave.pill
             wave.hover = nil
@@ -894,9 +859,8 @@ final class WavePanel: NSPanel {
         let next = frame(for: currentSize)
         if animated, isVisible {
             // While the window itself animates, pill state changes wait
-            // (setPill returns early) and hover is ignored (morphing).
+            // (setPill returns early) and hover is ignored (`morphing`).
             toggling = true
-            morphing = on
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.18
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -904,7 +868,6 @@ final class WavePanel: NSPanel {
             }, completionHandler: { [weak self] in
                 guard let self else { return }
                 self.toggling = false
-                self.morphing = false
                 self.layoutChevron()
                 self.invalidateShadow()
                 self.syncChevronHover()
@@ -927,10 +890,16 @@ final class WavePanel: NSPanel {
         compact ? WaveView.pillBox : WaveView.fullSize
     }
     private var toggling = false   // card <-> pill window animation in flight
+    /// Any pill transition in flight: the window toggle or a capsule morph.
+    private var morphing: Bool { toggling || !morphLink.isPaused }
     /// The capsule the current pill state wants, inside pillBox.
     private var targetShape: NSRect { WaveView.pillShape(wave.pill, mini: wave.pillMini) }
-    /// The drawn capsule in screen coordinates, for cursor checks.
-    private var shapeOnScreen: NSRect { convertToScreen(wave.convert(wave.pillRect, to: nil)) }
+    private var mouseInWindow: NSPoint {
+        convertFromScreen(NSRect(origin: NSEvent.mouseLocation, size: .zero)).origin
+    }
+    private func mouseInWave() -> NSPoint { wave.convert(mouseInWindow, from: nil) }
+    /// Is the cursor over the drawn capsule (not just the bigger window)?
+    private var cursorInPill: Bool { wave.pillRect.contains(mouseInWave()) }
 
     private func applyChrome() {
         if compact {
@@ -939,7 +908,6 @@ final class WavePanel: NSPanel {
             return
         }
         let r = WaveView.radius
-        effect.radius = r
         effect.maskImage = Self.roundedMask(radius: r)
         wave.layer?.cornerRadius = r
     }
@@ -955,32 +923,25 @@ final class WavePanel: NSPanel {
 
     private func setPill(_ s: PillState, animated: Bool) {
         let opening = s == .action && wave.pill == .idle
-        wave.morphFromPill = wave.pill == .idle ? s : wave.pill
+        wave.morphFromPill = wave.pill
         wave.pill = s
-        dismissHint()
-        hoverWatch?.invalidate(); hoverWatch = nil
+        stopHover()
         if s == .action {
-            // Belt and braces for mouseExited: the bar must never stay open
-            // with the cursor elsewhere, so poll the cursor while it is up.
-            // Close only once the cursor has been out for a beat, so grazing
-            // the edge does not slam the bar shut.
+            // The bar closes from here, not from mouseExited: exit events
+            // fired mid-morph flickered it. Close only once the cursor has
+            // been off the capsule for a beat, so grazing the edge is free.
             var outsideSince: TimeInterval?
-            let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            hoverWatch = repeating(0.05) { [weak self] in
                 guard let self, self.compact, self.wave.pill == .action, !self.morphing else { return }
-                if self.shapeOnScreen.contains(NSEvent.mouseLocation) { outsideSince = nil; return }
+                if self.cursorInPill { outsideSince = nil; return }
                 let now = Date().timeIntervalSinceReferenceDate
                 if outsideSince == nil { outsideSince = now }
                 if now - outsideSince! >= 0.2 { self.setPill(.idle, animated: true) }
             }
-            RunLoop.main.add(t, forMode: .common)
-            hoverWatch = t
         }
         if s == .rec { wave.pillMini = false }
         if s == .mini { wave.pillMini = true }
         wave.hover = nil
-        // Pill mode never carries a window shadow (toggling one mid-morph flickers).
-        hasShadow = false
-        applyChrome()
         wave.needsDisplay = true
         // Mid card->pill toggle: the state is set; the toggle's completion
         // morphs into it once the window has landed.
@@ -992,17 +953,21 @@ final class WavePanel: NSPanel {
         morph(to: targetShape, animated: animated, soft: opening)
     }
 
-    /// Same 0.18s ease as the compact toggle. A jump instead when the target
-    /// is on another screen, so the pill never flies across monitors.
-    private var morphing = false
     private var hoverWatch: Timer?
-    /// `soft`: the hover-open gets a longer, eased-out glide so the bar feels
-    /// like it grows out of the outline instead of snapping.
+    /// Pending hover label and the bar's close watch: torn down together by
+    /// every transition that takes the bar away.
+    private func stopHover() {
+        dismissHint()
+        hoverWatch?.invalidate(); hoverWatch = nil
+    }
+
+    /// Animate the capsule to `next`. `soft`: the hover-open springs (a
+    /// longer, eased-out glide so the bar grows out of the outline); anything
+    /// else eases in and out.
     private func morph(to next: NSRect, animated: Bool, soft: Bool = false) {
         if animated, isVisible {
             // Display-link driven, one frame per screen refresh, our easing.
             // Starts from wherever the capsule is right now, mid-flight included.
-            morphing = true
             morphFrom = wave.shape
             morphTo = next
             // Reset the clock before anything redraws: the pill state has
@@ -1012,13 +977,9 @@ final class WavePanel: NSPanel {
             wave.needsDisplay = true
             morphSoft = soft
             morphStart = CACurrentMediaTime()
-            morphLink?.invalidate()
-            let link = wave.displayLink(target: self, selector: #selector(morphTick(_:)))
-            link.add(to: .main, forMode: .common)
-            morphLink = link
+            morphLink.isPaused = false
         } else {
-            morphLink?.invalidate(); morphLink = nil
-            morphing = false
+            morphLink.isPaused = true
             wave.morphT = 1
             wave.shape = next
             wave.needsDisplay = true
@@ -1026,7 +987,13 @@ final class WavePanel: NSPanel {
         }
     }
 
-    private var morphLink: CADisplayLink?
+    /// One display link for the panel's life, paused between morphs.
+    private lazy var morphLink: CADisplayLink = {
+        let link = wave.displayLink(target: self, selector: #selector(morphTick(_:)))
+        link.isPaused = true
+        link.add(to: .main, forMode: .common)
+        return link
+    }()
     private var morphFrom = NSRect.zero
     private var morphTo = NSRect.zero
     private var morphSoft = false
@@ -1056,23 +1023,18 @@ final class WavePanel: NSPanel {
         wave.shape = t >= 1 ? morphTo : f
         wave.needsDisplay = true
         if t >= 1 {
-            link.invalidate()
-            morphLink = nil
-            morphing = false
+            link.isPaused = true
             wave.morphT = 1
             pillSettled()
         }
     }
 
-    /// After a morph: shadow for the new shape, and in the action bar the
-    /// tooltips and hover highlight for wherever the cursor already is.
+    /// After a morph: settle the bars, then act on wherever the cursor is
+    /// now (mouse events during the morph were ignored).
     private func pillSettled() {
-        invalidateShadow()
         guard compact else { return }
         if wave.pill == .idle, wave.state != .wave { wave.reset() }
-        // Enter/exit events fired mid-morph were ignored (they flickered the
-        // bar open and shut); decide from where the cursor actually is now.
-        let inside = shapeOnScreen.contains(NSEvent.mouseLocation)
+        let inside = cursorInPill
         if wave.pill == .idle, inside { setPill(.action, animated: true); return }
         if wave.pill == .action, !inside { setPill(.idle, animated: true); return }
         guard wave.pill == .action else { return }
@@ -1083,70 +1045,61 @@ final class WavePanel: NSPanel {
     private func setHover(_ h: Int?) {
         let changed = h != wave.hover
         if changed { wave.hover = h; wave.needsDisplay = true }
-        guard let h, compact, wave.pill == .action else {
-            hintDelay?.cancel(); hintDelay = nil
-            hint.hide(); return
-        }
+        guard let h, compact, wave.pill == .action else { dismissHint(immediately: false); return }
         if !changed, hint.isVisible || hintDelay != nil { return }
         // Only a lingering hover gets the label; a pass across the bar does not.
-        hintDelay?.cancel()
-        hint.hide()
+        dismissHint(immediately: false)
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.compact, self.wave.pill == .action, self.wave.hover == h else { return }
             self.hintDelay = nil
-            let r = self.wave.actionButtonRect(h)
-            let anchor = NSPoint(x: self.frame.minX + r.midX, y: self.frame.minY + self.wave.pillRect.minY - 4)
-            self.hint.show(self.hintText(h), under: anchor, parent: self)
+            self.hint.show(self.hintText(h), under: self.hintAnchor(x: self.wave.actionButtonRect(h).midX), parent: self)
         }
         hintDelay = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.hintDelaySeconds, execute: work)
     }
     private var hintDelay: DispatchWorkItem?
     private static let hintDelaySeconds: TimeInterval = 0.7
-    /// Drop the hover label at once, pending or shown. Anything that takes
-    /// the action bar away (expand, a take starting, closing) calls this.
-    private func dismissHint() {
+    /// Drop the hover label, pending or shown: at once when a transition takes
+    /// the bar away, with its fade when the cursor merely leaves a button.
+    private func dismissHint(immediately: Bool = true) {
         hintDelay?.cancel(); hintDelay = nil
-        hint.hide(immediately: true)
+        hint.hide(immediately: immediately)
+    }
+
+    /// One run of hint text: 13pt regular, white at `alpha`.
+    private func hintRun(_ text: String, _ alpha: CGFloat = 0.95) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .regular),
+            .foregroundColor: NSColor(calibratedWhite: 1, alpha: alpha)])
+    }
+
+    /// Screen point for a hint's top center: `x` in wave coords, 4pt under the capsule.
+    private func hintAnchor(x: CGFloat) -> NSPoint {
+        let p = wave.convert(NSPoint(x: x, y: wave.pillRect.minY - 4), to: nil)
+        return convertToScreen(NSRect(origin: p, size: .zero)).origin
     }
 
     private func hintText(_ i: Int) -> NSAttributedString {
-        let label = NSFont.systemFont(ofSize: 13, weight: .regular)
         let out = NSMutableAttributedString()
-        func add(_ t: String, _ a: CGFloat) {
-            out.append(NSAttributedString(string: t, attributes: [
-                .font: label, .foregroundColor: NSColor(calibratedWhite: 1, alpha: a)]))
-        }
         switch i {
-        case 0: add("Settings", 0.95)
+        case 0: out.append(hintRun("Settings"))
         case 1:
-            add("Record", 0.95)
+            out.append(hintRun("Record"))
             let keys = keycaps(recordHotkey).compactMap { $0.1 }.joined(separator: " ")
-            if !keys.isEmpty { add("  " + keys, 0.55) }
-        default: add("Expand window", 0.95)
+            if !keys.isEmpty { out.append(hintRun("  " + keys, 0.55)) }
+        default: out.append(hintRun("Expand window"))
         }
         return out
     }
 
-    private func mouseInWave() -> NSPoint {
-        let win = convertFromScreen(NSRect(origin: NSEvent.mouseLocation, size: .zero)).origin
-        return wave.convert(win, from: nil)
-    }
-
-    // Hover: idle opens the action bar, leaving it closes it. Recording
-    // states ignore the cursor.
-    override func mouseEntered(with event: NSEvent) {
-        // The tracking area is the whole (bigger) window; only the capsule counts.
-        if compact, !morphing, wave.pill == .idle, shapeOnScreen.contains(NSEvent.mouseLocation) {
-            setPill(.action, animated: true)
-        }
-    }
-
+    // Hover: moving onto the idle capsule opens the action bar (the tracking
+    // area is the whole window, so mouseMoved does the capsule test); the
+    // hover watch closes it. Recording states ignore the cursor.
     override func mouseExited(with event: NSEvent) {
         guard compact, !morphing, wave.pill == .action else { return }
-        // The hover watch timer closes the bar after a short grace; an exit
-        // event alone should not slam it shut. Just drop the highlight.
-        if !shapeOnScreen.contains(NSEvent.mouseLocation) { setHover(nil) }
+        // The hover watch closes the bar after a short grace; an exit event
+        // alone should not slam it shut. Just drop the highlight.
+        if !cursorInPill { setHover(nil) }
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -1169,7 +1122,7 @@ final class WavePanel: NSPanel {
         case .action:
             switch wave.actionButton(at: p) {
             case 0: onSettings?()
-            case 1: onRecord?()
+            case 1: onToggleRecord?()
             case 2:
                 if recordingActive {
                     setCompact(false, animated: true)
@@ -1181,35 +1134,30 @@ final class WavePanel: NSPanel {
                 }
             default: break
             }
-        case .rec:
-            if wave.discRect.contains(p) { onStop?(); return }
-            UserDefaults.standard.set(true, forKey: "pillMini")
-            setPill(.mini, animated: true)
-        case .mini:
-            UserDefaults.standard.set(false, forKey: "pillMini")
-            setPill(.rec, animated: true)
+        case .rec, .mini:
+            // The disc is Stop; anywhere else on the pill toggles rec <-> mini.
+            if wave.pill == .rec, wave.discRect.contains(p) { onToggleRecord?(); return }
+            pillMiniPref.toggle()
+            setPill(pillMiniPref ? .mini : .rec, animated: true)
         case .busy:
             break
         }
     }
 
-    /// After a morph the cursor may already sit in the icon hitbox.
+    /// After a toggle the cursor may already sit in the icon hitbox.
     private func syncChevronHover() {
-        let win = convertFromScreen(NSRect(origin: NSEvent.mouseLocation, size: .zero)).origin
-        let local = chevron.convert(win, from: nil)
+        guard !compact else { return }   // hidden in pill mode
+        let local = chevron.convert(mouseInWindow, from: nil)
         chevron.alphaValue = chevron.bounds.contains(local) ? chevron.lit : 0
     }
 
+    /// Top-right corner of the card. Hidden in pill mode, so no layout there.
     private func layoutChevron() {
+        guard !compact else { return }
         let s: CGFloat = 18
         let b = wave.bounds
-        if compact {
-            chevron.autoresizingMask = [.minXMargin]
-            chevron.frame = NSRect(x: b.maxX - s - 6, y: (b.height - s) / 2, width: s, height: s)
-        } else {
-            chevron.autoresizingMask = [.minXMargin, .minYMargin]
-            chevron.frame = NSRect(x: b.maxX - s - 12, y: b.maxY - s - 10, width: s, height: s)
-        }
+        chevron.autoresizingMask = [.minXMargin, .minYMargin]
+        chevron.frame = NSRect(x: b.maxX - s - 12, y: b.maxY - s - 10, width: s, height: s)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -1243,9 +1191,9 @@ final class WavePanel: NSPanel {
         if compact {
             let mouse = NSEvent.mouseLocation
             let s = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main ?? NSScreen.screens[0]
-            // screen.frame, not visibleFrame: the pill sits over the notch and
-            // the menu bar, flush with the top; idle tucks 9pt further in.
-            // The window is flush with the top; the capsule's inset lives in pillShape.
+            // screen.frame, not visibleFrame: the pill box sits over the notch
+            // and the menu bar, flush with the top. Each state's inset below
+            // that edge lives in pillShape.
             return NSPoint(x: s.frame.midX - size.width / 2, y: s.frame.maxY - size.height)
         }
         // Preferred spot: wherever it was dragged last, else bottom-center
