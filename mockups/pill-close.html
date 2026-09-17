@@ -1,0 +1,200 @@
+<title>Whisper Pill Close</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --bg: #101012; --stage: #1a1719; --ink: #f2f0ee;
+    --dim: rgba(242,240,238,.55); --faint: rgba(242,240,238,.14); --accent: #ef5b4a;
+    color-scheme: dark;
+  }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: "Instrument Sans", system-ui, -apple-system, sans-serif; padding-inline: 20px; padding-block: 28px 60px; }
+  main { max-width: 1040px; margin-inline: auto; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 6px; letter-spacing: -.01em; text-wrap: balance; }
+  .lede { color: var(--dim); font-size: 14px; margin: 0 0 20px; max-width: 62ch; line-height: 1.5; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 22px; }
+  button { font: inherit; font-size: 13px; font-weight: 500; color: var(--ink); background: transparent; border: 1px solid var(--faint); border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+  button:hover { border-color: rgba(242,240,238,.35); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  .hint { color: var(--dim); font-size: 13px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+  .opt { display: grid; grid-template-rows: auto 1fr auto auto; border: 1px solid var(--faint); border-radius: 12px; overflow: hidden; }
+  .opt.current { border-color: rgba(239,91,74,.55); }
+  .opt header { display: flex; justify-content: space-between; align-items: baseline; padding: 12px 14px 10px; }
+  .opt h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .tag { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; color: var(--dim); letter-spacing: .04em; text-transform: uppercase; }
+  .current .tag { color: var(--accent); }
+  .opt p { margin: 0; padding: 0 14px 12px; color: var(--dim); font-size: 13px; line-height: 1.45; }
+  .stage { background: var(--stage); height: 150px; position: relative; display: flex; justify-content: center; align-items: flex-start; background-image: radial-gradient(ellipse at 50% 120%, rgba(90,60,70,.35), transparent 60%); }
+  .notch { position: absolute; top: 0; left: 50%; translate: -50% 0; width: 150px; height: 20px; background: #000; border-radius: 0 0 12px 12px; }
+  .box { position: relative; width: 132px; height: 48px; }
+  .pill { position: absolute; box-sizing: border-box; border-radius: 999px; }
+  .ring { position: absolute; inset: 0; border-radius: 999px; border: 1px solid rgba(255,255,255,.35); }
+  .icons { position: absolute; inset: 0; display: flex; justify-content: center; align-items: center; gap: 10px; }
+  .btn { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; color: #fff; }
+  .btn:hover { background: rgba(255,255,255,.22); }
+  .btn svg { width: 15px; height: 15px; display: block; }
+  .params { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11.5px; line-height: 1.6; color: var(--dim); padding: 10px 14px 12px; border-top: 1px solid var(--faint); white-space: pre; overflow-x: auto; }
+  .params b { color: var(--ink); font-weight: 500; }
+</style>
+<main>
+  <h1>Whisper pill close</h1>
+  <p class="lede">Same open every time: the app's spring (0.46s, ~4% overshoot), icons fading and scaling in once the capsule has room. Only the way it shrinks back changes. Hover a pill and then move off, or hit Loop. The red-marked card is what's in the app now.</p>
+  <div class="controls">
+    <button id="loop" aria-pressed="false">Loop all</button>
+    <button id="slow" aria-pressed="false">Half speed</button>
+    <span class="hint">Every number below maps straight onto <code>morphTick</code> and <code>drawPill</code>.</span>
+  </div>
+  <div class="grid" id="grid"></div>
+</main>
+
+<script>
+  // ---- geometry, same as Panel.swift ----
+  const BOX = { w: 132, h: 48 };
+  const IDLE = { w: 44, h: 8, inset: 8 };
+  const ACTION = { w: 116, h: 38, inset: 5 };
+  const rectFor = s => ({ x: Math.round((BOX.w - s.w) / 2), y: BOX.h - s.inset - s.h, w: s.w, h: s.h }); // y-up like AppKit
+  const R_IDLE = rectFor(IDLE), R_ACTION = rectFor(ACTION);
+  const lerp = (a, b, e) => ({ x: a.x + (b.x - a.x) * e, y: a.y + (b.y - a.y) * e, w: a.w + (b.w - a.w) * e, h: a.h + (b.h - a.h) * e });
+  const clamp01 = v => Math.max(0, Math.min(1, v));
+
+  // ---- easings ----
+  const spring = (t, dur, zeta = 0.716, omega = 16) => {
+    const wd = omega * Math.sqrt(1 - zeta * zeta), sec = t * dur, env = Math.exp(-zeta * omega * sec);
+    return 1 - env * (Math.cos(wd * sec) + (zeta * omega / wd) * Math.sin(wd * sec));
+  };
+  const inOutCubic = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+  const outQuart = x => 1 - Math.pow(1 - x, 4);
+  const outExpo = x => x >= 1 ? 1 : 1 - Math.pow(2, -10 * x);
+  const inOutSine = x => -(Math.cos(Math.PI * x) - 1) / 2;
+  const inQuad = x => x * x;
+
+  // The app's open: e drives the rect, k = e drives fill, contents from 35%.
+  const OPEN = { dur: .46, frame(t) { const e = spring(t, .46); return { e, k: e, content: clamp01((e - .35) / .65) }; } };
+
+  // Each close returns {e: rect progress 0->1 toward idle, k: "expanded look" 1->0, content: icon alpha}.
+  // In the app today, closing sets k = 1 - e and content = clamp((k - .35)/.65).
+  const CLOSES = [
+    { key: 'A', name: 'Current', current: true,
+      blurb: 'Ease-in-out cubic. Starts slow, so for the first few frames it looks like nothing happened. Icons thin out right away.',
+      dur: .28, frame(t) { const e = inOutCubic(t), k = 1 - e; return { e, k, content: clamp01((k - .35) / .65) }; },
+      note: 'close 0.28s ease-in-out cubic\nk = 1 - e, icons = (k-.35)/.65\nno hold before it starts' },
+    { key: 'B', name: 'Quick release',
+      blurb: 'Ease-out quart, the mirror of the open. Moves the instant you leave and lands soft. Reads as the bar letting go.',
+      dur: .26, frame(t) { const e = outQuart(t), k = 1 - e; return { e, k, content: clamp01((k - .35) / .65) }; },
+      note: 'close 0.26s ease-out quart\nsame fill/icon rule as A\nfast first frame, soft landing' },
+    { key: 'C', name: 'Icons first',
+      blurb: 'Two beats. Icons fade in 90ms while the shape holds, then the capsule shrinks on its own. Nothing gets clipped mid-shrink.',
+      dur: .34, frame(t) {
+        const sec = t * .34; const iconT = clamp01(sec / .09); const shrinkT = clamp01((sec - .09) / .25);
+        const e = outQuart(shrinkT); return { e, k: 1 - e, content: 1 - iconT }; },
+      note: 'icons 0.09s fade, then\nshrink 0.25s ease-out quart\ntotal 0.34s' },
+    { key: 'D', name: 'Spring back',
+      blurb: 'Same spring as the open, run in reverse. The thin idle line lands with a tiny wobble so both directions feel like one material.',
+      dur: .40, frame(t) { const e = spring(t, .40, 0.78, 16), k = 1 - clamp01(e); return { e, k, content: clamp01((k - .35) / .65) }; },
+      note: 'close 0.40s spring, zeta .78\n~2% undershoot on the idle line\nicons same rule as A' },
+    { key: 'E', name: 'Fade and shrink',
+      blurb: 'Icons are gone by a third of the way, the black fill fades to the glass a bit ahead of the shrink. Feels like it dissolves back.',
+      dur: .30, frame(t) { const e = outExpo(t); const k = 1 - clamp01(t / .7); return { e, k, content: clamp01(1 - t / .33) }; },
+      note: 'shape 0.30s ease-out expo\nfill fades over first 70%\nicons gone by 33%' },
+    { key: 'F', name: 'Slow settle',
+      blurb: 'A longer 0.42s ease-out expo. Unhurried, like a drawer on a soft-close hinge. Most relaxed of the set.',
+      dur: .42, frame(t) { const e = outExpo(t), k = 1 - e; return { e, k, content: clamp01((k - .35) / .65) }; },
+      note: 'close 0.42s ease-out expo\nsame fill/icon rule as A\nlong tail' },
+    { key: 'G', name: 'Sine glide',
+      blurb: 'Ease-in-out sine, the gentlest S-curve. Less of a dead start than cubic but still symmetrical.',
+      dur: .30, frame(t) { const e = inOutSine(t), k = 1 - e; return { e, k, content: clamp01((k - .35) / .65) }; },
+      note: 'close 0.30s ease-in-out sine\nsame fill/icon rule as A\nsofter S than cubic' },
+    { key: 'H', name: 'Held then quick',
+      blurb: 'Waits 150ms after you leave, then a fast 0.22s ease-out. The pause makes accidental exits cheap; the close itself is crisp.',
+      dur: .37, frame(t) { const sec = t * .37; const c = clamp01((sec - .15) / .22); const e = outQuart(c), k = 1 - e; return { e, k, content: clamp01((k - .35) / .65) }; },
+      note: 'hold 0.15s (instead of 0.20s)\nthen 0.22s ease-out quart\ntotal 0.37s from exit' },
+  ];
+
+  const ICONS = {
+    gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
+    w: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="5" width="2.4" height="14" rx="1.2"/><rect x="7.4" y="11" width="2.4" height="8" rx="1.2"/><rect x="11.8" y="8" width="2.4" height="11" rx="1.2"/><rect x="16.2" y="11" width="2.4" height="8" rx="1.2"/><rect x="18.6" y="5" width="2.4" height="14" rx="1.2"/></svg>',
+    expand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
+  };
+
+  let speed = 1;
+  const grid = document.getElementById('grid');
+  const pills = [];
+
+  for (const o of CLOSES) {
+    const el = document.createElement('section');
+    el.className = 'opt' + (o.current ? ' current' : '');
+    el.innerHTML = `
+      <header><h2>${o.name}</h2><span class="tag">${o.current ? 'In the app' : 'Option ' + o.key}</span></header>
+      <p>${o.blurb}</p>
+      <div class="stage"><div class="notch"></div>
+        <div class="box" tabindex="0" aria-label="Option ${o.key} pill">
+          <div class="pill"><div class="ring"></div>
+            <div class="icons">
+              <span class="btn">${ICONS.gear}</span><span class="btn">${ICONS.w}</span><span class="btn">${ICONS.expand}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="params">${o.note.replace(/^(\S+)/gm, '<b>$1</b>')}</div>`;
+    grid.appendChild(el);
+    const box = el.querySelector('.box');
+    const p = { o, box, pill: el.querySelector('.pill'), ring: el.querySelector('.ring'), icons: el.querySelector('.icons'),
+                shape: { ...R_IDLE }, from: null, to: null, start: 0, prog: null, dur: 0, raf: 0, open: false };
+    render(p, R_IDLE, 0, 0);
+    pills.push(p);
+    const enter = () => { if (!p.open) go(p, true); };
+    const leave = () => { if (p.open) go(p, false); };
+    box.addEventListener('pointerenter', enter); box.addEventListener('pointerleave', leave);
+    box.addEventListener('focus', enter); box.addEventListener('blur', leave);
+  }
+
+  function go(p, open) {
+    p.open = open;
+    p.from = { ...p.shape };                       // mid-flight starts count, same as the app
+    p.to = open ? R_ACTION : R_IDLE;
+    p.prog = open ? OPEN : p.o;
+    p.dur = p.prog.dur * speed;
+    p.start = performance.now();
+    cancelAnimationFrame(p.raf);
+    const tick = now => {
+      const t = Math.min(1, (now - p.start) / (p.dur * 1000));
+      const f = p.prog.frame(t);
+      p.shape = lerp(p.from, p.to, f.e);
+      render(p, p.shape, f.k, f.content);
+      if (t < 1) p.raf = requestAnimationFrame(tick); else { p.shape = { ...p.to }; render(p, p.shape, open ? 1 : 0, open ? 1 : 0); }
+    };
+    p.raf = requestAnimationFrame(tick);
+  }
+
+  // k: 0 = glass idle look, 1 = black bar. content: icon alpha (scale rides on it, 0.8 -> 1).
+  function render(p, r, k, content) {
+    const s = p.pill.style;
+    s.left = r.x + 'px'; s.top = (BOX.h - r.y - r.h) + 'px'; s.width = r.w + 'px'; s.height = r.h + 'px';
+    // Black over the glass capsule, same as drawPill: glass fades out as black fades in.
+    s.background = `linear-gradient(rgba(10,10,10,${k}), rgba(10,10,10,${k})), rgba(255,255,255,${.18 * (1 - k)})`;
+    p.ring.style.opacity = 1 - k;
+    p.icons.style.opacity = content;
+    p.icons.style.transform = `scale(${.8 + .2 * content})`;
+  }
+
+  // Loop + half speed
+  let loopTimer = null;
+  const loopBtn = document.getElementById('loop'), slowBtn = document.getElementById('slow');
+  function startLoop() {
+    clearInterval(loopTimer);
+    let state = false;
+    const step = () => { state = !state; pills.forEach(p => go(p, state)); };
+    step(); loopTimer = setInterval(step, 1400 * speed);
+  }
+  loopBtn.addEventListener('click', () => {
+    const on = loopBtn.getAttribute('aria-pressed') !== 'true';
+    loopBtn.setAttribute('aria-pressed', on);
+    if (on) startLoop(); else { clearInterval(loopTimer); pills.forEach(p => { if (p.open) go(p, false); }); }
+  });
+  slowBtn.addEventListener('click', () => {
+    const on = slowBtn.getAttribute('aria-pressed') !== 'true';
+    slowBtn.setAttribute('aria-pressed', on);
+    speed = on ? 2 : 1;
+    if (loopBtn.getAttribute('aria-pressed') === 'true') startLoop();
+  });
+</script>

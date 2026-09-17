@@ -1,0 +1,219 @@
+<title>Whisper Notch Pill</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root{
+    --page:#141214; --text:#d9d4d0; --muted:#8a827e; --rule:#2a2527;
+    --wall-a:#2e2527; --wall-b:#191415; --bar:#3a3335;
+    --ink:#0b0b0c; --white:#f5f4f2; --coral:#ef5b4a; --hair:rgba(255,255,255,.30);
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sys:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif;
+    --s:2; /* screen scale: 1pt = 2px so the pills are legible */
+    color-scheme:dark;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--page);color:var(--text);font-family:var(--sys);padding-block:40px;padding-inline:clamp(16px,4vw,48px);line-height:1.5}
+  h1{font-size:22px;font-weight:600;margin:0 0 4px;letter-spacing:-.01em}
+  .lede{color:var(--muted);margin:0 0 32px;max-width:62ch;font-size:15px}
+  h2{font-family:var(--mono);font-weight:500;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:40px 0 10px}
+  p{max-width:62ch}
+  .note{font-family:var(--mono);font-size:12px;color:var(--muted);margin:8px 0 0;max-width:none}
+  .note b{color:var(--text);font-weight:500}
+
+  /* ---------- fake top of a MacBook screen ---------- */
+  .screen{position:relative;height:calc(96px*var(--s));border-radius:14px;overflow:hidden;
+    background:radial-gradient(120% 90% at 50% 120%,var(--wall-b),var(--wall-a));
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.05)}
+  .screen::before{ /* faint photo-ish streak like the desktop wallpaper in the shots */
+    content:"";position:absolute;inset:0;background:
+      linear-gradient(100deg,transparent 30%,rgba(120,150,110,.10) 38%,transparent 48%),
+      linear-gradient(80deg,transparent 55%,rgba(200,90,70,.10) 64%,transparent 72%);
+  }
+  .menubar{position:absolute;left:0;right:0;top:0;height:calc(37px*var(--s));background:rgba(58,51,53,.72);
+    display:flex;align-items:center;justify-content:space-between;padding-inline:calc(14px*var(--s));
+    font-size:calc(13px*var(--s));color:var(--white);letter-spacing:.005em;backdrop-filter:blur(20px)}
+  .menubar span{margin-right:calc(16px*var(--s));white-space:nowrap}
+  .menubar .app{font-weight:700}
+  .menubar .r span{margin:0 0 0 calc(14px*var(--s))}
+  .notch{position:absolute;left:50%;top:0;transform:translateX(-50%);width:calc(190px*var(--s));height:calc(37px*var(--s));
+    background:#000;border-radius:0 0 calc(10px*var(--s)) calc(10px*var(--s))}
+  .notch::before,.notch::after{ /* the little ears that curve into the bezel */
+    content:"";position:absolute;top:0;width:calc(10px*var(--s));height:calc(10px*var(--s));background:#000}
+  .notch::before{left:calc(-10px*var(--s));-webkit-mask:radial-gradient(circle at 0 100%,transparent 70%,#000 71%);mask:radial-gradient(circle at 0 100%,transparent 70%,#000 71%)}
+  .notch::after{right:calc(-10px*var(--s));-webkit-mask:radial-gradient(circle at 100% 100%,transparent 70%,#000 71%);mask:radial-gradient(circle at 100% 100%,transparent 70%,#000 71%)}
+
+  /* ---------- the pill ---------- */
+  .pill{position:absolute;left:50%;top:0;transform:translateX(-50%);background:var(--ink);color:var(--white);
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 calc(2px*var(--s)) calc(10px*var(--s)) rgba(0,0,0,.55);
+    transition:width .22s cubic-bezier(.2,.8,.2,1),height .22s cubic-bezier(.2,.8,.2,1),border-radius .22s,background .2s,box-shadow .2s;
+    cursor:default;user-select:none}
+  .pill svg{display:block}
+
+  /* idle: outline only, tucked inside the notch */
+  .pill.idle{width:calc(78px*var(--s));height:calc(18px*var(--s));top:calc(9px*var(--s));border-radius:999px;
+    background:transparent;box-shadow:inset 0 0 0 calc(1px*var(--s)) var(--hair)}
+  /* action bar: hangs below the notch over the menu bar */
+  .pill.action{width:calc(168px*var(--s));height:calc(44px*var(--s));border-radius:999px;gap:calc(34px*var(--s))}
+  .pill.action .btn{width:calc(22px*var(--s));height:calc(22px*var(--s));display:grid;place-items:center;border-radius:999px;opacity:.92;transition:opacity .15s,transform .15s;cursor:pointer}
+  .pill.action .btn:hover{opacity:1;transform:scale(1.1)}
+  /* recording */
+  .pill.rec{width:calc(152px*var(--s));height:calc(44px*var(--s));border-radius:999px;justify-content:flex-start;gap:0;cursor:pointer}
+  .pill.rec .dot{width:calc(34px*var(--s));height:calc(34px*var(--s));margin-left:calc(5px*var(--s));border-radius:999px;background:rgba(239,91,74,.32);display:grid;place-items:center;flex:none}
+  .pill.rec .dot svg{width:calc(15px*var(--s));height:calc(15px*var(--s))}
+  /* mini recording */
+  .pill.mini{width:calc(60px*var(--s));height:calc(26px*var(--s));border-radius:999px;cursor:pointer}
+
+  .wave{display:flex;align-items:center;height:100%}
+  .rec .wave{flex:1;justify-content:center;gap:calc(1.5px*var(--s));padding-inline:calc(10px*var(--s)) calc(14px*var(--s))}
+  .mini .wave{gap:calc(2px*var(--s))}
+  .wave i{display:block;width:calc(1.5px*var(--s));border-radius:1px;background:var(--white);height:calc(2px*var(--s));transition:height .14s ease-out}
+  .mini .wave i{width:calc(2px*var(--s));height:calc(4px*var(--s))}
+  .wave i.hi{background:#fff}
+
+  .caption{font-family:var(--mono);font-size:12px;color:var(--muted);display:flex;gap:24px;flex-wrap:wrap;margin-top:10px}
+  .caption b{color:var(--text);font-weight:500}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:28px 32px}
+  .state{min-width:0}
+  .state .screen{height:calc(70px*var(--s))}
+  .state h3{font-family:var(--mono);font-weight:500;font-size:13px;margin:12px 0 4px;color:var(--white)}
+  .state p{font-size:13px;color:var(--muted);margin:0}
+  .toast{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);background:rgba(0,0,0,.7);color:var(--white);font-size:13px;padding:6px 12px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none;white-space:nowrap}
+  .toast.on{opacity:1}
+  .kbd{font-family:var(--mono);font-size:12px;background:#221e20;border:1px solid var(--rule);border-radius:5px;padding:1px 6px;color:var(--text)}
+  ul.diff{padding-left:18px;margin:0;max-width:66ch;font-size:14px}
+  ul.diff li{margin:6px 0}
+  @media (prefers-reduced-motion:reduce){.pill{transition:none}}
+  @media (max-width:520px){:root{--s:1.5}}
+</style>
+
+<h1>Whisper notch pill</h1>
+<p class="lede">The small mode redrawn to sit in the notch the way Superwhisper does. Four looks, one window: it just changes shape. Shown at 2x so you can see the details. Try the live one.</p>
+
+<h2>Live</h2>
+<div class="screen" id="demo">
+  <div class="menubar">
+    <div class="l"><span></span><span class="app">Ghostty</span><span>File</span><span>Edit</span><span>View</span><span>Window</span></div>
+    <div class="r"><span>Tue Sep 16</span><span>12:35 PM</span></div>
+  </div>
+  <div class="notch"></div>
+  <div class="pill idle" id="pill" tabindex="0" aria-label="Whisper"></div>
+  <div class="toast" id="toast"></div>
+</div>
+<p class="note"><b>Hover</b> the outline to open the bar. <b>Click the bars logo</b> to record. <b>Click the pill</b> while recording to shrink it, again to grow. <b>Click the red button</b> or press <span class="kbd">esc</span> to stop.</p>
+
+<h2>The four states</h2>
+<div class="grid">
+  <div class="state">
+    <div class="screen"><div class="menubar"><div class="l"><span></span><span class="app">Ghostty</span><span>File</span><span>Edit</span></div><div class="r"><span>12:35 PM</span></div></div><div class="notch"></div>
+      <div class="pill idle"></div></div>
+    <h3>1 · Idle</h3>
+    <p>Nothing but a 1pt hairline capsule, 78×18, tucked inside the notch. No fill, no shadow. You barely notice it, which is the point.</p>
+  </div>
+  <div class="state">
+    <div class="screen"><div class="menubar"><div class="l"><span></span><span class="app">Ghostty</span><span>File</span><span>Edit</span></div><div class="r"><span>12:35 PM</span></div></div><div class="notch"></div>
+      <div class="pill action">
+        <div class="btn" title="Settings">SPARK</div><div class="btn" title="Record">LOGO</div><div class="btn" title="Expand">EXPAND</div>
+      </div></div>
+    <h3>2 · Hover: action bar</h3>
+    <p>Grows to 168×44 solid black, hanging 7pt below the notch over the menu bar. Three buttons: settings, record, expand to the full card.</p>
+  </div>
+  <div class="state">
+    <div class="screen"><div class="menubar"><div class="l"><span></span><span class="app">Ghostty</span><span>File</span><span>Edit</span></div><div class="r"><span>12:35 PM</span></div></div><div class="notch"></div>
+      <div class="pill rec"><div class="dot">LOGO</div><div class="wave" data-n="26"></div></div></div>
+    <h3>3 · Recording</h3>
+    <p>152×44. Left: a 34pt disc in 32% coral with the Whisper bars in full coral, that's the stop button. Right: a scrolling ticker of 1.5pt white bars on a 3pt pitch, same as the big card.</p>
+  </div>
+  <div class="state">
+    <div class="screen"><div class="menubar"><div class="l"><span></span><span class="app">Ghostty</span><span>File</span><span>Edit</span></div><div class="r"><span>12:35 PM</span></div></div><div class="notch"></div>
+      <div class="pill mini"><div class="wave" data-n="6"></div></div></div>
+    <h3>4 · Recording, shrunk</h3>
+    <p>60×26 with six live 2pt bars. Click the recording pill to get here, click again to grow back. Still stops on the hotkey or esc.</p>
+  </div>
+</div>
+
+<h2>Versus what's built now</h2>
+<ul class="diff">
+  <li><b>Solid black, not frosted.</b> Today's compact pill is a hudWindow blur with a hairline. The notch look only works if the pill is the same black as the notch, so it reads as one shape.</li>
+  <li><b>Inside the notch, not below it.</b> Today the pill docks top-center just under the menu bar. New: the window starts at y=0 and overlaps the notch, so idle is invisible inside it and the bigger states hang out of it.</li>
+  <li><b>Always there.</b> The idle outline stays on screen between takes, so hover works. Today the panel hides when you're not recording.</li>
+  <li><b>Hover bar replaces the chevron.</b> Settings, record, and expand live on the bar. The full 428×120 card still exists, expand opens it.</li>
+  <li><b>Stop is the red button</b> on the left of the recording pill, not a footer word.</li>
+  <li><b>Coral is the only color.</b> Everything else is black, white, and one hairline.</li>
+</ul>
+
+<script>
+(function(){
+  const SPARK = '<svg viewBox="0 0 24 24" width="'+(19*2)+'" height="'+(19*2)+'" fill="none" stroke="#f5f4f2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>';
+  const LOGO = function(color,size){return '<svg viewBox="0 0 1024 1024" width="'+size+'" height="'+size+'" fill="'+color+'"><g transform="translate(512 512) scale(1.8) translate(-512 -512)"><rect x="287" y="292" width="34" height="440"/><rect x="391" y="530" width="34" height="202"/><rect x="495" y="362" width="34" height="291"/><rect x="599" y="530" width="34" height="202"/><rect x="703" y="292" width="34" height="440"/></g></svg>';};
+  const EXPAND = '<svg viewBox="0 0 24 24" width="'+(17*2)+'" height="'+(17*2)+'" fill="none" stroke="#f5f4f2" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7"/></svg>';
+
+  // fill placeholders in the static states
+  document.querySelectorAll('.btn').forEach(b=>{
+    const t=b.textContent.trim();
+    b.innerHTML = t==='SPARK'?SPARK : t==='LOGO'?LOGO('#f5f4f2',18*2) : EXPAND;
+  });
+  document.querySelectorAll('.dot').forEach(d=>{ d.innerHTML = LOGO('#ef5b4a',15*2); });
+
+  // waveform ticker: a fake voice envelope so it looks like talking
+  const S = 2;
+  function makeWave(el,n){
+    el.innerHTML=''; const bars=[];
+    for(let i=0;i<n;i++){const b=document.createElement('i');el.appendChild(b);bars.push(b);}
+    el._bars=bars; el._hist=new Array(n).fill(0.05); el._t=Math.random()*100;
+  }
+  document.querySelectorAll('.wave').forEach(w=>makeWave(w,+w.getAttribute('data-n')));
+  let paused = matchMedia('(prefers-reduced-motion:reduce)').matches;
+  function tick(){
+    document.querySelectorAll('.wave').forEach(w=>{
+      if(!w.isConnected) return;
+      w._t += 0.035; w._f=(w._f||0)+1; if(w._f%3) return;
+      const t=w._t;
+      const env = Math.max(0, Math.sin(t*0.7)*0.5+0.5 - (Math.sin(t*0.13)>0.8?0.4:0));
+      const v = Math.min(1, 0.08 + env*(0.35+0.65*Math.abs(Math.sin(t*3.1)*Math.cos(t*1.7))) + Math.random()*0.12);
+      w._hist.push(v); w._hist.shift();
+      const mini = w.parentElement.classList.contains('mini');
+      const maxH = mini?14:22;
+      w._bars.forEach((b,i)=>{
+        const lv = mini ? (0.15 + 0.85*w._hist[w._hist.length-1]*Math.sin(Math.PI*(i+0.5)/w._bars.length)) : w._hist[i];
+        b.style.height = Math.max(2, lv*maxH)*S + 'px';
+        b.style.opacity = mini?1:(0.45+0.55*(i/w._bars.length));
+      });
+    });
+    if(!paused) requestAnimationFrame(tick);
+  }
+  tick();
+
+  // live demo state machine
+  const pill=document.getElementById('pill'), demo=document.getElementById('demo'), toast=document.getElementById('toast');
+  let state='idle', tt;
+  function say(m){toast.textContent=m;toast.classList.add('on');clearTimeout(tt);tt=setTimeout(()=>toast.classList.remove('on'),1600);}
+  function render(){
+    pill.className='pill '+state;
+    if(state==='idle'){pill.innerHTML='';}
+    else if(state==='action'){
+      pill.innerHTML='<div class="btn" data-a="mode">'+SPARK+'</div><div class="btn" data-a="rec">'+LOGO('#f5f4f2',18*2)+'</div><div class="btn" data-a="expand">'+EXPAND+'</div>';
+    } else if(state==='rec'){
+      pill.innerHTML='<div class="dot" data-a="stop">'+LOGO('#ef5b4a',15*2)+'</div><div class="wave"></div>';
+      makeWave(pill.querySelector('.wave'),26);
+    } else if(state==='mini'){
+      pill.innerHTML='<div class="wave"></div>';
+      makeWave(pill.querySelector('.wave'),6);
+    }
+  }
+  pill.addEventListener('mouseenter',()=>{ if(state==='idle'){state='action';render();} });
+  pill.addEventListener('mouseleave',()=>{ if(state==='action'){state='idle';render();} });
+  pill.addEventListener('click',e=>{
+    const a=e.target.closest('[data-a]')?.getAttribute('data-a');
+    if(state==='action'){
+      if(a==='rec'){state='rec';render();say('Recording · Tink');}
+      else if(a==='mode'){say('Opens Settings');}
+      else if(a==='expand'){say('Opens the full 428×120 card');}
+    } else if(state==='rec'){
+      if(a==='stop'){state='idle';render();say('Stopped · transcribing…');}
+      else {state='mini';render();}
+    } else if(state==='mini'){ state='rec';render(); }
+  });
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&(state==='rec'||state==='mini')){state='idle';render();say('Stopped · transcribing…');} });
+  render();
+})();
+</script>

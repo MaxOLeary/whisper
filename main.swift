@@ -366,6 +366,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             forName: Notification.Name("com.maxoleary.whisper.openSettings"), object: nil, queue: .main
         ) { [weak self] _ in self?.settings.show(page: .home) }
         capture.onLevel = { [weak self] level in self?.panel.push(level: level) }
+        // Notch pill buttons. toggleRecording already picks meeting vs dictation stop.
+        panel.onRecord = { [weak self] in self?.toggleRecording() }
+        panel.onStop = { [weak self] in self?.toggleRecording() }
+        panel.onSettings = { [weak self] in self?.openSettings() }
+        panel.recordHotkey = cfg.recordHotkey
+        // Pill mode: the idle outline is always on screen, from launch.
+        if UserDefaults.standard.bool(forKey: "panelCompact") { panel.showIdle() }
         installMeetingObserver()
 
         // Accessibility is what lets us watch keys globally and press Cmd+V.
@@ -476,8 +483,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .idle:
             if type == .keyDown {
                 if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return Unmanaged.passUnretained(event) }
-                // Esc closes a lingering result card early.
-                if key == escape, panel.isVisible {
+                // Esc closes a lingering result card early. In pill mode the
+                // window is always up, so only a non-idle pill counts.
+                if key == escape, panel.showsResult {
                     DispatchQueue.main.async { self.panel.hide() }
                     return nil
                 }
@@ -1165,6 +1173,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         parakeet.latinOnly = ParakeetEngine.usesLatinScript(cfg.language)
         if let r = Hotkey.parse(cfg.recordHotkey) { recordHK = r }
         if let c = Hotkey.parse(cfg.cleanupHotkey) { cleanupHK = c }
+        panel.recordHotkey = cfg.recordHotkey
         refreshIcon()
         syncStore()
         let engineKeys: Set<String> = ["engine", "modelPath", "parakeetModel", "serverPort", "threads", "language", "whisperPath"]

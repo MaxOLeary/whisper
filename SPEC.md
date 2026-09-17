@@ -88,3 +88,38 @@ Verification (how we will know each stage worked):
 - 1. Option+Space, click up: pill sits at the top of the screen over the tab bar, bars still move while you talk, tabs around it stay clickable. Click down: full card returns at its old spot. Next take opens compact. Esc still hides. Debrief meeting card does the same. After `./build.sh`, `Panel.swift.o` mtime is newer than `Panel.swift` (incremental release has skipped this file before).
 
 Current stage: done
+
+---
+
+# Whisper notch pill
+
+Goal:
+Replace the frosted 100x28 compact pill with Superwhisper's notch pill: one black window at the top-center of the screen that changes shape through four states. Mockup (approved 2026-09-16, gear instead of sparkle): `mockups/notch-pill.html`. Reference screenshots: Desktop `Screenshot 2026-09-16 at 12.35.*.png`.
+
+Out of scope:
+- The full 428x120 card. It stays exactly as is (frosted, draggable, footer, chevron-up collapses to the pill).
+- Live words on the pill, a mode picker on the pill, any settings UI for the pill.
+- Record / transcribe / paste pipeline, `config.json`.
+
+Architecture (short):
+Same `WavePanel`, no second window. `compact == true` now means "pill mode"; `panelCompact` in `UserDefaults` still remembers it and the full card's chevron-up still switches into it. New `PillState` enum on `WaveView`: `idle`, `action`, `rec`, `mini`, `busy`. All pill states are horizontally centered on `screen.frame.midX` and flush with `screen.frame.maxY` (over the notch / hidden menu bar), placed on the screen under the mouse at show time and on `NSScreen.main` for the always-on idle. Corner radius is always half the height. All sizes in points:
+
+- `idle`  60x12, top inset 8. Translucent capsule: white 10% fill, 1pt ring at white 25%. No blur, no shadow. Stays on screen whenever pill mode is on and nothing is recording (this replaces "hidden when not recording"). Not draggable.
+- `action` 150x38 opaque black (`white: 0.04`), top inset 5, window shadow on. Opens while the mouse is over the pill (0.28s eased glide) and closes the instant the cursor leaves (0.16s), with a cursor poll as a backstop. Three 22pt hit targets, 30pt apart, icons white 92%, 100% + scale 1.1 on hover: `gearshape` (Settings), the Whisper five-bar glyph (Record), `arrow.up.left.and.arrow.down.right` (Expand = switch to the full card, `setCompact(false)`). Hovering a button shows a hint in a small child window 6pt under the bar: "Settings", "Record  ⌥ Space" (the record hotkey as keycaps), "Expand".
+- `rec` 136x38 opaque black, top inset 5. Left: 30pt disc, 4pt in from the left edge, fill coral `#ef5b4a` at 32%, the five-bar glyph in full coral at 13pt. Clicking the disc = Stop. Right: ticker of 1.5pt white bars on a 3pt pitch, centered in the remaining width, bar alpha fading 45% -> 100% left to right. Ticker advances one bar every 3rd frame at 60fps. Clicking anywhere except the disc shrinks to `mini`.
+- `mini` 54x22 opaque black, top inset 5. Six live 2pt bars on a 4pt pitch, symmetric bell shape scaled by the eased mic level, white 100%. Click grows back to `rec`. Persist `pillMini` in `UserDefaults` so the next take opens in the last of `rec` / `mini`.
+- `busy` (transcribing / loading model) keeps the `rec` or `mini` shape; disc goes white 12% with the glyph white 55%, bars run the existing transcribing ripple. `hide()` in pill mode animates to `idle` instead of `orderOut`. `hide()` in full-card mode is unchanged.
+
+Drawing: the pill states must not sit on `hudWindow` material. Keep `PillEffectView` for the full card; in pill mode it must leave the view hierarchy entirely (hidden is not enough: a behind-window blur keeps shaping the window with its mask, which drew lens-shaped pills) so `idle` is a translucent capsule and the others are solid black. Morphs between states animate the frame over 0.18s ease-in-out like today's compact toggle. Hover via an `NSTrackingArea` (`activeAlways`, `mouseEnteredAndExited`, `mouseMoved` for the per-button hover). The panel stays `nonactivatingPanel`; clicking a button must not bring Whisper to the front, and Ghostty keeps focus.
+
+Wiring: `WavePanel` gets three closures set from `main.swift`: `onRecord` (calls `toggleRecording()`), `onStop` (calls `toggleRecording()` too, which already picks meeting vs dictation stop), `onSettings` (calls `openSettings()`). Esc behavior unchanged. At launch, if `panelCompact` is true, show the idle pill. `startRecording` in pill mode morphs `idle` -> `rec`/`mini` in place. Meeting mode uses the same pill.
+
+Stages:
+- [x] 1. `Panel.swift`: `PillState`, geometry, drawing (outline, black fill, disc, glyph, icons, both tickers), hover tracking, click routing through the three closures, morph animations, `hide()` -> `idle`, `pillMini` persistence. Full card untouched. Compiles with the closures unset.
+- [x] 2. `main.swift` wiring: set the closures, show the idle pill at launch when `panelCompact`, `startRecording` / `stopRecording` / meeting paths keep working through the pill. `./build.sh`, install, launch with `open -a`.
+
+Verification (how we will know each stage worked):
+- 1. `./build.sh` passes; `Panel.swift.o` mtime is newer than `Panel.swift`. Reading the diff: the full-card code paths are byte-for-byte the same except where the chevron hands off to pill mode.
+- 2. App running with pill mode on: a faint outline sits top-center with nothing else showing. Hover: black bar with gear / bars / expand; mouse away: outline again. Click bars: Tink, red disc + moving ticker, no focus change in Ghostty. Click the ticker: shrinks to six bars; click again: grows. Click the disc: Pop, disc goes grey while transcribing, text pastes, pill fades back to the outline. Hotkey start/stop and Esc do the same things. Expand: the full 428x120 card at its old spot; chevron-up on the card: back to the outline. Quit and relaunch: pill comes back in the state it was left in. Debrief meeting: same pill, disc click ends the meeting.
+
+Current stage: done (built + installed 2026-09-16; second pass same day: smaller pills, top inset, instant hover close, hover hints; third pass 2026-09-17: fixed-size 132x48 pill window with the capsule animated inside it via CADisplayLink, spring open, hover-delayed Superwhisper-style hint, idle 44x8, action/rec 116 wide, hint dismissed on expand/take)
