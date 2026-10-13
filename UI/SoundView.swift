@@ -26,6 +26,21 @@ struct SoundView: View {
                     soundPicker(value: store.stopSound, key: "stopSound")
                 }
             }
+            SettingsGroup(title: "Music") {
+                SettingsRow(title: "While dictating",
+                            subtitle: "Turns the speakers down so music stays out of the take. Skipped with wired headphones and in meetings.") {
+                    Picker("", selection: Binding(
+                        get: { store.musicDuringTake },
+                        set: { store.save(["musicDuringTake": $0]) }
+                    )) {
+                        Text("Keep playing").tag("off")
+                        Text("Lower").tag("lower")
+                        Text("Mute").tag("mute")
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 180)
+                }
+            }
         }
         .onAppear { store.refresh() }
     }

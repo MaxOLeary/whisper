@@ -76,6 +76,16 @@ final class WaveView: NSView {
         return NSRect(x: ((pillBox.width - sz.width) / 2).rounded(), y: pillBox.height - inset - sz.height,
                       width: sz.width, height: sz.height)
     }
+    /// Idle is a 6pt sliver, so its hover and click zone is padded out this
+    /// far on each side; the other states are big enough to hit as drawn.
+    static let idlePad = NSSize(width: 12, height: 10)
+    /// The capsule the cursor has to be in: the drawn one, padded while idle
+    /// (and settled; a morph in flight keeps the exact shape). Never past the
+    /// window, which is flush with the top of the screen anyway.
+    var hitRect: NSRect {
+        guard compact, pill == .idle, morphT >= 1 else { return pillRect }
+        return pillRect.insetBy(dx: -Self.idlePad.width, dy: -Self.idlePad.height).intersection(bounds)
+    }
     /// Pill radius follows the live capsule so a morph in flight stays a capsule.
     var radius: CGFloat { compact ? min(pillRect.width, pillRect.height) / 2 : Self.radius }
 
@@ -615,9 +625,9 @@ final class PillHostView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        let r = shape?.radius ?? WaveView.radius
         let local = superview.map { convert(point, from: $0) } ?? point
-        let b = shape?.pillRect ?? bounds
+        let b = shape?.hitRect ?? bounds
+        let r = shape.map { min($0.radius, b.height / 2) } ?? WaveView.radius
         if !NSBezierPath(roundedRect: b, xRadius: r, yRadius: r).contains(local) { return nil }
         return super.hitTest(point)
     }
@@ -689,6 +699,9 @@ final class WavePanel: NSPanel {
     var onSettings: (() -> Void)?
     /// Shown in the Record hint ("Record  ⌥ Space"); main.swift keeps it current.
     var recordHotkey = ""
+    /// Dictation: the card is carried to each desktop as the user switches.
+    /// Meeting (Debrief): it stays on the desktop the meeting started on.
+    private(set) var followsSpaces = true
     private let hint = HintPanel()
 
     init() {
@@ -701,7 +714,7 @@ final class WavePanel: NSPanel {
         ignoresMouseEvents = false
         hidesOnDeactivate = false   // the settings window can make us active; the card must survive us going inactive again
         isMovableByWindowBackground = true   // grab anywhere on the card and drag
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        collectionBehavior = Self.hereOnly
 
         // Frosted-glass card. layer.cornerRadius does not clip the material, so
         // the blur would fill the window's square and show as a halo outside the
@@ -742,13 +755,38 @@ final class WavePanel: NSPanel {
             guard let self, self.isVisible else { return }
             self.place()
         }
+
+        // The panel lives on one desktop at a time, so it has to be carried to
+        // each new one as the user switches. Re-asserting on every switch is
+        // what replaces the old permanent .canJoinAllSpaces tag, which the
+        // window server kept dropping. See moveToActiveSpace. A meeting card
+        // opts out (followsSpaces) and stays put.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.isVisible, self.followsSpaces else { return }
+            self.bringUp()
+            self.place()
+        }
+
+        // A wake does not always come with a Space change, and it is the one
+        // event that reliably left the card stranded on another desktop.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.isVisible else { return }
+            if self.followsSpaces { self.bringUp() }
+            self.place()
+        }
     }
 
     private func keycaps(_ hotkey: String) -> [(String, String?)] {
         hotkey.split(separator: "+").map { ("", keycap(String($0))) }
     }
 
-    func show(mode: Mode, hotkey: String, footer: String? = nil, closeLabel: String = "Close") {
+    func show(mode: Mode, hotkey: String, footer: String? = nil, closeLabel: String = "Close",
+              followSpaces: Bool = true) {
+        followsSpaces = followSpaces
         wave.reset()
         wave.footerDim = false
         wave.footerLeft = footer ?? (mode == .cleanup ? "Cleanup" : "Whisper")
@@ -785,14 +823,44 @@ final class WavePanel: NSPanel {
         }
     }
 
-    /// Order front, re-tagging "show on every Space" first. The window server
-    /// can drop that tag (seen after a sleep/wake, or after the card was
-    /// dragged) and pin the panel to one Space, so the card only appeared on
-    /// a desktop the user was not looking at while dictation kept working.
+    /// Order front onto whichever desktop is in front right now.
     private func bringUp() {
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        moveToActiveSpace()
         orderFrontRegardless()
         if !compact { invalidateShadow() }
+    }
+
+    /// Live on one desktop at a time: whichever Space was in front when the
+    /// panel last went up.
+    static let hereOnly: NSWindow.CollectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+    /// Transient, only worn across an orderFront. See moveToActiveSpace.
+    static let allSpaces: NSWindow.CollectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+
+    /// Drag the window onto the Space the user is actually looking at.
+    ///
+    /// The old approach was to wear .canJoinAllSpaces permanently so the card
+    /// floated over every desktop. The window server kept dropping that tag —
+    /// a sleep/wake was the reliable way to lose it — and a card with no tag
+    /// falls back to the Space it was born on. Dictation kept working with the
+    /// visualizer stranded on desktop 3: window frames logged from
+    /// CGWindowListCopyWindowInfo slid sideways with a Space swipe and went
+    /// off screen, which a stationary all-Spaces window never does.
+    ///
+    /// So stop relying on the tag holding. .canJoinAllSpaces goes on only long
+    /// enough for one orderFront, which is what makes the server hand the
+    /// window to the current Space; dropping it immediately after re-binds the
+    /// window right there. Worst case the tag is ignored and we are no worse
+    /// off than before.
+    ///
+    /// Unconditional on purpose. isOnActiveSpace is not trustworthy for a
+    /// window that is currently ordered out, which is exactly the case every
+    /// take starts from, and the two writes always differ from each other so
+    /// neither can be swallowed as a no-op (AppKit only talks to the window
+    /// server when collectionBehavior actually changes).
+    private func moveToActiveSpace() {
+        collectionBehavior = Self.allSpaces
+        orderFrontRegardless()
+        collectionBehavior = Self.hereOnly
     }
 
     func transcribing(status: String? = nil) {
@@ -891,7 +959,7 @@ final class WavePanel: NSPanel {
             // A chevron click can land during the card's hide fade; the pill
             // must come up solid and stay ordered in.
             alphaValue = 1
-            if !isVisible { orderFrontRegardless() }
+            if !isVisible { bringUp() }
         }
         // Hidden was not enough: a behind-window blur view keeps shaping the
         // window with its maskImage even when hidden, and that mask was
@@ -962,7 +1030,7 @@ final class WavePanel: NSPanel {
     }
     private func mouseInWave() -> NSPoint { wave.convert(mouseInWindow, from: nil) }
     /// Is the cursor over the drawn capsule (not just the bigger window)?
-    private var cursorInPill: Bool { wave.pillRect.contains(mouseInWave()) }
+    private var cursorInPill: Bool { wave.hitRect.contains(mouseInWave()) }
 
     /// Keep the idle glass under the drawn capsule, fading with the idle look.
     private func syncIdleGlass() {
@@ -1180,7 +1248,7 @@ final class WavePanel: NSPanel {
         guard compact else { return }
         let p = wave.convert(event.locationInWindow, from: nil)
         if wave.pill == .idle {
-            if !morphing, wave.pillRect.contains(p) { setPill(.action, animated: true) }
+            if !morphing, wave.hitRect.contains(p) { setPill(.action, animated: true) }
             return
         }
         guard wave.pill == .action else { return }

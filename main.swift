@@ -36,6 +36,7 @@ struct Config: Codable {
     var parakeetModel: String?   // folder under models/; nil = best installed build
     var hotwordsScore: Double?   // set (e.g. 1) to turn on vocabulary.txt hotwords; nil = off
     var meetingNotesDir: String? // Meeting notes folder; nil = ~/Debrief
+    var musicDuringTake: String? // "lower" / "mute" turns the speakers down while dictating; nil = off
 
     static let dir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/whisper", isDirectory: true)
@@ -337,6 +338,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let r = Hotkey.parse(cfg.recordHotkey) else { fatal("Bad recordHotkey in config.json: \(cfg.recordHotkey)") }
         guard let c = Hotkey.parse(cfg.cleanupHotkey) else { fatal("Bad cleanupHotkey in config.json: \(cfg.cleanupHotkey)") }
         recordHK = r; cleanupHK = c
+        Ducker.restore()   // last run quit mid-take with the speakers turned down
 
         // Transcripts are private: owner-only dir, and log() keeps files 600.
         try? FileManager.default.createDirectory(at: App.dictationDir, withIntermediateDirectories: true)
@@ -394,6 +396,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         takeGen += 1
         take = nil
         _ = capture.stop()
+        Ducker.restore()
         server?.terminate()
         restoreClipboard()
     }
@@ -612,13 +615,24 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         state = .recording(mode)
-        playTakeSound(Config.soundName(cfg.startSound, fallback: "Tink"))
+        // Tink at full volume, then turn the speakers down so music doesn't
+        // land in the take. Not in meetings: that would mute the call.
+        let tink = playTakeSound(Config.soundName(cfg.startSound, fallback: "Tink"))
+        if !meetingActive, let mode = cfg.musicDuringTake {
+            DispatchQueue.main.asyncAfter(deadline: .now() + tink) {
+                guard self.takeGen == gen, case .recording = self.state else { return }
+                Ducker.duck(mode)
+            }
+        }
         let engineStatus = cfg.engineName == "parakeet" ? parakeet.status : ""
         DispatchQueue.main.async {
+            // A meeting card stays on the desktop it started on; dictation
+            // follows you from desktop to desktop.
             self.panel.show(mode: mode,
                             hotkey: self.meetingActive ? Meeting.stopChord : self.cfg.recordHotkey,
                             footer: self.meetingActive ? "Debrief" : nil,
-                            closeLabel: self.meetingActive ? "Cancel" : "Close")
+                            closeLabel: self.meetingActive ? "Cancel" : "Close",
+                            followSpaces: !self.meetingActive)
             // Engine still downloading or loading: show that in the footer.
             if !engineStatus.isEmpty { self.panel.setFooterLeft(engineStatus) }
         }
@@ -629,6 +643,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func stopRecording(shouldPaste: Bool = true) {
         guard case .recording(let mode) = state else { return }
         state = .transcribing
+        Ducker.restore()   // volume back first, so the Pop plays at full volume
         playTakeSound(Config.soundName(cfg.stopSound, fallback: "Pop"))
         let samples = capture.stop()
         let gen = take?.gen ?? takeGen
@@ -728,6 +743,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let tAsr = CFAbsoluteTimeGetCurrent()
+        text = Numbers.digitize(text)   // "twenty five" -> "25" on every take
         if inMeeting {
             guard meetingActive, meetingGen == expectedMeetingGen else { return }
             finishMeeting(samples: samples, text: text, seconds: seconds, expectedGen: expectedMeetingGen)
@@ -742,7 +758,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        if mode == .cleanup, let cleaned = cleanup(text) { text = cleaned }
+        if mode == .cleanup, let cleaned = cleanup(text) { text = Numbers.digitize(cleaned) }
         text = Config.applyReplacements(replacements, to: text)
 
         pasted = true
@@ -1197,6 +1213,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         store.sounds = cfg.sounds
         store.startSound = Config.soundName(cfg.startSound, fallback: "Tink")
         store.stopSound = Config.soundName(cfg.stopSound, fallback: "Pop")
+        store.musicDuringTake = cfg.musicDuringTake ?? "off"
         store.engineName = cfg.engineName
         store.modelMissing = cfg.engineName == "whisper" && !FileManager.default.fileExists(atPath: cfg.modelPath)
     }
@@ -1210,9 +1227,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         syncStore()
     }
 
-    func playTakeSound(_ name: String) {
-        guard cfg.sounds, !name.isEmpty else { return }
-        NSSound(named: NSSound.Name(name))?.play()
+    /// Returns how long the sound lasts (0 when silent).
+    @discardableResult
+    func playTakeSound(_ name: String) -> TimeInterval {
+        guard cfg.sounds, !name.isEmpty, let s = NSSound(named: NSSound.Name(name)) else { return 0 }
+        s.play()
+        return s.duration
     }
 
     /// Preview from the Sound page. Works even when Sounds is off, so you

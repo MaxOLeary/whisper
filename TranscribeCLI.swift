@@ -41,7 +41,7 @@ enum TranscribeCLI {
             do {
                 let samples = try converter.resampleAudioFile(path: wav)
                 let text = engine.transcribe(samples, timeout: 90)
-                emit(["text": text])
+                emit(["text": Numbers.digitize(text)])
             } catch {
                 NSLog("Whisper transcribe CLI: \(error)")
                 emit(["error": error.localizedDescription, "text": ""])

@@ -22,6 +22,7 @@ final class AppStore: ObservableObject {
     @Published var sounds = true
     @Published var startSound = "Tink"
     @Published var stopSound = "Pop"
+    @Published var musicDuringTake = "off"
     @Published var launchAtLogin = false
     @Published var engineName = "parakeet"
     @Published var modelMissing = false
