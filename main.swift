@@ -235,11 +235,12 @@ struct Hotkey {
         return (hk.flags.isEmpty && hk.keyCode == nil) ? nil : hk
     }
 
-    /// `cmd+alt+space` from a keyDown. Needs at least one modifier, or an F-key,
-    /// so a stray letter never becomes the record chord. Nil = keep listening.
+    /// `cmd+alt+space` from a keyDown. Needs cmd, alt, or ctrl, or an F-key, so
+    /// a stray letter (or shift+space while typing) never becomes a chord.
+    /// Nil = keep listening.
     static func string(flags: CGEventFlags, keyCode: Int64) -> String? {
         guard let name = namesByCode[keyCode] else { return nil }
-        let hasMod = !flags.intersection(modifierMask).isEmpty
+        let hasMod = !flags.intersection([.maskCommand, .maskAlternate, .maskControl]).isEmpty
         let isFn = fnCodes.contains(keyCode)
         guard hasMod || isFn else { return nil }
         var parts: [String] = []
@@ -276,7 +277,7 @@ struct Hotkey {
 
 enum Mode { case plain, cleanup }
 /// Where a take is. Named RecordState so it never shadows SwiftUI.State.
-enum RecordState { case idle, recording(Mode), transcribing }
+enum RecordState { case idle, opening(Mode), recording(Mode), transcribing }
 
 struct Transcript: Identifiable {
     let id = UUID()
@@ -317,7 +318,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var tap: CFMachPort?
     var preview: NSSound?
     let panel = WavePanel()
-    let capture = Capture()
+    var capture = Capture()
     let segmenter = Segmenter()
     let work = DispatchQueue(label: "whisper.work")
     var takeGen = 0
@@ -504,17 +505,21 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     break
                 }
             }
-        case .recording:
+        case .opening, .recording:
             // Dictation: tap the record/cleanup chord again to stop and paste.
             // Meeting: Option+Command+Space stops (not Option+Space). Esc
             // closes the card; the take still transcribes.
+            // .opening: the mic call is still inside CoreAudio, off this thread.
+            // A second tap cancels. It must not wait on that call.
             if type == .keyDown {
                 if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return nil }
                 if key == escape {
-                    if meetingActive { cancelMeeting() } else { stopRecording(shouldPaste: false) }
+                    if case .opening = state { cancelOpening() }
+                    else if meetingActive { cancelMeeting() }
+                    else { stopRecording(shouldPaste: false) }
                     return nil
                 }
-                if meetingActive {
+                if meetingActive, case .recording = state {
                     let mh = Meeting.stopHotkey
                     if mh.keyCode == key && mh.modifiersHeld(flags) {
                         stopRecording(); return nil
@@ -526,7 +531,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                 } else {
                     for (hk, _) in chords where hk.keyCode == key && hk.modifiersHeld(flags) {
-                        stopRecording(); return nil
+                        if case .opening = state { cancelOpening() } else { stopRecording() }
+                        return nil
+                    }
+                    if meetingActive, Meeting.stopHotkey.keyCode == key, Meeting.stopHotkey.modifiersHeld(flags) {
+                        cancelOpening(); return nil
                     }
                 }
             } else if type == .keyUp {
@@ -534,9 +543,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if meetingActive, Meeting.stopHotkey.keyCode == key { return nil }
                 for (hk, _) in chords where hk.keyCode == key { return nil }
             } else if type == .flagsChanged {
-                if meetingActive { break }
+                if meetingActive, case .recording = state { break }
                 for (hk, _) in chords where hk.keyCode == nil && hk.modifiersHeld(flags) {
-                    stopRecording(); break
+                    if case .opening = state { cancelOpening() } else { stopRecording() }
+                    break
                 }
             }
         case .transcribing:
@@ -590,6 +600,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func startRecording(_ mode: Mode) {
         store.hotkeyCapture = nil
+        guard case .idle = state else { return }
         guard checkModel(quiet: false) else {
             if meetingActive {
                 meetingActive = false
@@ -601,41 +612,101 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let gen = takeGen
         take = StreamTake(gen: gen)
         segmenter.reset()
-        capture.onChunk = { [weak self] chunk in
+        // The event tap runs on the main thread. capture.open returns
+        // immediately; CoreAudio gets its own queue and a 2s timeout.
+        state = .opening(mode)
+        let cap = capture
+        cap.onChunk = { [weak self] chunk in
             self?.work.async { self?.ingest(chunk, gen: gen) }
         }
-        guard capture.start(deviceName: cfg.audioDevice) else {
-            take = nil
-            capture.onChunk = nil
-            if meetingActive {
-                meetingActive = false
-                DispatchQueue.main.async { self.statusItem.isVisible = true }
-            }
-            alert("Couldn't open the microphone.")
+        cap.open(deviceName: cfg.audioDevice) { [weak self] result in
+            self?.finishOpening(result, mode: mode, gen: gen, cap: cap)
+        }
+    }
+
+    /// Mic open finished (or gave up). Main thread. A stale gen means the
+    /// take was cancelled while CoreAudio was still thinking.
+    func finishOpening(_ result: MicOpen, mode: Mode, gen: Int, cap: Capture) {
+        let stillOurs: Bool = {
+            guard takeGen == gen else { return false }
+            if case .opening = state { return true }
+            return false
+        }()
+        guard stillOurs else {
+            if result == .ok { _ = cap.stop() }
+            return
+        }
+        switch result {
+        case .ok:
+            break
+        case .failed:
+            failOpening("Couldn't open the microphone.")
+            return
+        case .timedOut:
+            // This Capture is stuck in inputNode. Drop it and keep the app.
+            retireCapture()
+            failOpening("Microphone didn't answer. CoreAudio is stuck, so this take was skipped.")
+            NSLog("Whisper: mic open timed out in CoreAudio; kept running")
             return
         }
         state = .recording(mode)
         // Tink at full volume, then turn the speakers down so music doesn't
         // land in the take. Not in meetings: that would mute the call.
         let tink = playTakeSound(Config.soundName(cfg.startSound, fallback: "Tink"))
-        if !meetingActive, let mode = cfg.musicDuringTake {
+        if !meetingActive, let duck = cfg.musicDuringTake {
             DispatchQueue.main.asyncAfter(deadline: .now() + tink) {
                 guard self.takeGen == gen, case .recording = self.state else { return }
-                Ducker.duck(mode)
+                Ducker.duck(duck)
             }
         }
         let engineStatus = cfg.engineName == "parakeet" ? parakeet.status : ""
-        DispatchQueue.main.async {
-            // A meeting card stays on the desktop it started on; dictation
-            // follows you from desktop to desktop.
-            self.panel.show(mode: mode,
-                            hotkey: self.meetingActive ? Meeting.stopChord : self.cfg.recordHotkey,
-                            footer: self.meetingActive ? "Debrief" : nil,
-                            closeLabel: self.meetingActive ? "Cancel" : "Close",
-                            followSpaces: !self.meetingActive)
-            // Engine still downloading or loading: show that in the footer.
-            if !engineStatus.isEmpty { self.panel.setFooterLeft(engineStatus) }
+        // A meeting card stays on the desktop it started on; dictation
+        // follows you from desktop to desktop.
+        panel.show(mode: mode,
+                   hotkey: meetingActive ? Meeting.stopChord : cfg.recordHotkey,
+                   footer: meetingActive ? "Debrief" : nil,
+                   closeLabel: meetingActive ? "Cancel" : "Close",
+                   followSpaces: !meetingActive)
+        if !engineStatus.isEmpty { panel.setFooterLeft(engineStatus) }
+    }
+
+    /// Second tap, or Esc, before the mic answered.
+    func cancelOpening() {
+        guard case .opening = state else { return }
+        takeGen += 1
+        take = nil
+        capture.onChunk = nil
+        // Swap even when the open might still succeed: if it is the wedged
+        // call, the next hotkey has to have a live Capture waiting.
+        retireCapture()
+        if meetingActive {
+            meetingGen += 1
+            meetingActive = false
+            statusItem.isVisible = true
         }
+        state = .idle
+        NSLog("Whisper: mic open cancelled")
+    }
+
+    func failOpening(_ message: String) {
+        take = nil
+        capture.onChunk = nil
+        if meetingActive {
+            meetingActive = false
+            statusItem.isVisible = true
+        }
+        state = .idle
+        alert(message)
+    }
+
+    /// The hung Capture stays alive until CoreAudio returns, then tears
+    /// itself down. The app keeps a new one.
+    func retireCapture() {
+        capture.abandon()
+        capture.onLevel = nil
+        capture.onChunk = nil
+        capture = Capture()
+        capture.onLevel = { [weak self] level in self?.panel.push(level: level) }
     }
 
     /// Second hotkey tap: stop, transcribe, paste. Esc: same, but the card
@@ -1056,6 +1127,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let (tint, tip): (NSColor?, String)
         switch state {
         case .idle: (tint, tip) = (nil, "Whisper: press \(cfg.recordHotkey) to dictate")
+        case .opening: (tint, tip) = (.systemRed, "Opening microphone…")
         case .recording: (tint, tip) = (.systemRed, "Recording…")
         case .transcribing: (tint, tip) = (.systemOrange, "Transcribing…")
         }
@@ -1077,6 +1149,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let toggleTitle: String
         switch state {
         case .idle: toggleTitle = "Toggle Recording"
+        case .opening: toggleTitle = "Cancel"
         case .recording: toggleTitle = "Stop Recording"
         case .transcribing: toggleTitle = "Transcribing…"
         }
@@ -1166,6 +1239,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func toggleRecording() {
         switch state {
         case .idle: startRecording(menuMode)
+        case .opening: cancelOpening()
         case .recording: stopRecording()
         case .transcribing: break
         }

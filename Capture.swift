@@ -1,9 +1,17 @@
 import AppKit
 import AVFoundation
 
+/// How a mic open ended. `.timedOut` means CoreAudio never returned; the
+/// caller has to drop this instance, because that call cannot be cancelled.
+enum MicOpen { case ok, failed, timedOut }
+
 /// One mic tap: 16 kHz mono float into RAM, plus RMS for the waveform card.
 final class Capture {
     static let sampleRate: Double = 16_000
+    /// `AVAudioEngine.inputNode` asks CoreAudio for the hardware format, and
+    /// that call blocks forever when coreaudiod is wedged (DisplayLink USB
+    /// audio does this). Longer than a slow USB mic, short of a frozen app.
+    static let openTimeout: TimeInterval = 2
 
     var onLevel: ((CGFloat) -> Void)?
     /// New 16 kHz samples, called off the audio thread's tap. Copy is already ours.
@@ -14,29 +22,79 @@ final class Capture {
     private var samples: [Float] = []
     private let lock = NSLock()
     private var live = false
+    /// Set when the open is taking too long or the take was cancelled.
+    /// The engine queue is the only thread that touches `engine`.
+    private var abandoned = false
+    private let engineQ = DispatchQueue(label: "whisper.capture.engine")
+
+    /// Opens the mic off the caller's thread. `done` runs on the main queue
+    /// exactly once. On `.timedOut` this instance is dead: CoreAudio is still
+    /// inside it, and calling in again would queue behind that call.
+    func open(deviceName: String, timeout: TimeInterval = Capture.openTimeout,
+              done: @escaping (MicOpen) -> Void) {
+        lock.lock()
+        abandoned = false
+        lock.unlock()
+        let gate = OpenGate()
+        engineQ.async { [weak self] in
+            guard let self else { return }
+            let ok = self.start(deviceName: deviceName)
+            if self.isAbandoned || !gate.claim() {
+                self.teardownNow()
+                return
+            }
+            let result: MicOpen = ok ? .ok : .failed
+            DispatchQueue.main.async { done(result) }
+        }
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout) { [weak self] in
+            guard let self, gate.claim() else { return }
+            self.abandon()
+            DispatchQueue.main.async { done(.timedOut) }
+        }
+    }
+
+    /// The in-flight open should tear the engine down and report nothing.
+    func abandon() {
+        lock.lock()
+        abandoned = true
+        lock.unlock()
+    }
+
+    private var isAbandoned: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return abandoned
+    }
 
     /// `deviceName` is the mic's localizedName from config.json; empty, "0", or
-    /// an unknown name means the system default input.
-    func start(deviceName: String = "") -> Bool {
+    /// an unknown name means the system default input. Runs on `engineQ`.
+    /// The `inputNode` line is the one that blocks inside CoreAudio.
+    private func start(deviceName: String = "") -> Bool {
         lock.lock()
         samples.removeAll(keepingCapacity: true)
         samples.reserveCapacity(Int(Capture.sampleRate * 30))
         live = true
         lock.unlock()
+        if isAbandoned { return false }
 
         let e = AVAudioEngine()
         let input = e.inputNode
+        if isAbandoned { return false }
         if let id = Capture.deviceID(named: deviceName), let unit = input.audioUnit {
             var dev = id
             let st = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
                                           &dev, UInt32(MemoryLayout<AudioDeviceID>.size))
             if st != noErr { NSLog("Whisper capture: could not select \"\(deviceName)\" (\(st)); using default") }
         }
-        let hw = input.outputFormat(forBus: 0)
+        // inputFormat, not outputFormat: after a device switch outputFormat
+        // keeps the old device's rate (44.1k while music plays), the tap
+        // fails, and the take records silence.
+        let hw = input.inputFormat(forBus: 0)
         guard hw.channelCount > 0, hw.sampleRate > 0,
               let dst = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Capture.sampleRate,
                                       channels: 1, interleaved: false),
               let conv = AVAudioConverter(from: hw, to: dst) else { return false }
+        if isAbandoned { return false }
         converter = conv
         let ratio = Capture.sampleRate / hw.sampleRate
         input.installTap(onBus: 0, bufferSize: 2048, format: hw) { [weak self] buf, _ in
@@ -71,12 +129,39 @@ final class Capture {
             self.lock.unlock()
             if running { self.onChunk?(chunk) }
         }
+        if isAbandoned {
+            input.removeTap(onBus: 0)
+            converter = nil
+            return false
+        }
         do { try e.start(); engine = e; return true } catch {
             NSLog("Whisper capture: \(error)")
             input.removeTap(onBus: 0)
             converter = nil
             return false
         }
+    }
+
+    /// Stops the tap and returns the samples taken so far. Does not wait on
+    /// CoreAudio: tearing the engine down is queued, and a wedged HAL must
+    /// not freeze whoever called this.
+    @discardableResult
+    func stop() -> [Float] {
+        lock.lock()
+        live = false
+        let s = samples
+        samples.removeAll(keepingCapacity: true)
+        lock.unlock()
+        onChunk = nil
+        engineQ.async { [weak self] in self?.teardownNow() }
+        return s
+    }
+
+    private func teardownNow() {
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+        engine = nil
+        converter = nil
     }
 
     /// Every audio input macOS knows about, in system order.
@@ -112,20 +197,17 @@ final class Capture {
         return st == noErr && id != 0 ? id : nil
     }
 
-    @discardableResult
-    func stop() -> [Float] {
+}
+
+/// First caller wins. The mic open and its timeout both try.
+private final class OpenGate {
+    private let lock = NSLock()
+    private var claimed = false
+    func claim() -> Bool {
         lock.lock()
-        live = false
-        lock.unlock()
-        engine?.inputNode.removeTap(onBus: 0)
-        engine?.stop()
-        engine = nil
-        converter = nil
-        onChunk = nil
-        lock.lock()
-        let s = samples
-        samples.removeAll(keepingCapacity: true)
-        lock.unlock()
-        return s
+        defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
     }
 }

@@ -384,6 +384,8 @@ extension App {
                 panel.wave.footerLeft = "Debrief"
                 panel.wave.needsDisplay = true
             }
+        case .opening:
+            break
         case .idle:
             meetingGen += 1
             meetingActive = true
