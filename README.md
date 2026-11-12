@@ -100,6 +100,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maxoleary.whisper.pl
 
 Building from source needs the Xcode command line tools (`swift`). No Homebrew.
 
+Mac fixes ship with a port note in [`ports/`](ports/README.md). If you have the newest Windows or Linux source, that file tells you how to make the same change, or says the change is Mac-only.
+
 ```sh
 ./build.sh          # builds, signs, installs /Applications/Whisper.app
 ./build.sh --ship   # also zips, verifies, and uploads the GitHub release
