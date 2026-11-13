@@ -1,12 +1,13 @@
 import AppKit
 import QuartzCore
+import SwiftUI
 
 // MARK: - Floating waveform panel
 
 /// What the card is currently showing.
 enum PanelState { case wave, busy }
 
-/// Pill-mode shapes. `idle` is the hairline capsule in the notch, `action`
+/// Pill-mode shapes. `idle` is the liquid-glass capsule in the notch, `action`
 /// the hover bar, `rec`/`mini` the two recording sizes, `busy` transcribing
 /// in whichever of those two it interrupted.
 enum PillState { case idle, action, rec, mini, busy }
@@ -168,6 +169,17 @@ final class WaveView: NSView {
         return super.hitTest(point)
     }
 
+    /// The glass view under us does not drag the window. This view covers the
+    /// card, so the drag starts here. False so AppKit delivers mouseDown
+    /// instead of starting a drag we never see. The chevron is a subview and
+    /// keeps its own click.
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let panel = window as? WavePanel, panel.cardCanDrag else { return }
+        panel.dragCard(with: event)
+    }
+
     override func draw(_ rect: NSRect) {
         if compact { drawPill(); return }
         let b = bounds
@@ -175,11 +187,11 @@ final class WaveView: NSView {
         // Clip to the pill so tall bars can't paint through the corners
         // and show up as a halo outside the card.
         NSBezierPath(roundedRect: b, xRadius: r, yRadius: r).addClip()
-        // Near-opaque dark wash over the blur, plus a hairline border.
-        // (The soft edge translucency comes from the NSVisualEffectView behind us.)
-        let card = NSBezierPath(roundedRect: b.insetBy(dx: 0.5, dy: 0.5), xRadius: r, yRadius: r)
-        NSColor(calibratedWhite: 0.07, alpha: 0.55).setFill(); card.fill()
-        NSColor(calibratedWhite: 1, alpha: 0.09).setStroke(); card.lineWidth = 1; card.stroke()
+        // The glass is composited by the window server, so it never lands in
+        // this view's pixels. Below about 10% alpha the window server treats
+        // the card as air and the click never arrives.
+        NSColor.black.withAlphaComponent(0.12).setFill()
+        NSBezierPath(rect: b).fill()
 
         if !compact { drawFooter(rect) }
         drawBars()
@@ -308,35 +320,27 @@ final class WaveView: NSView {
         return NSRect(x: pillRect.minX + 4, y: pillRect.minY + (pillRect.height - d) / 2, width: d, height: d)
     }
 
-    /// How much of the idle look is showing: 1 with the outline fully up, 0
-    /// once a black state has taken over, gliding through a morph so the
-    /// fill, ring, glass and contents crossfade with the shape instead of
-    /// snapping on the first frame. Only a morph with idle at one end
-    /// crossfades; black to black (rec <-> mini, action -> rec) stays solid.
+    /// How much of the idle look is showing: 1 with the glass capsule fully
+    /// up, 0 once a black state has taken over, gliding through a morph so
+    /// the glass and contents crossfade with the shape instead of snapping
+    /// on the first frame. Only a morph with idle at one end crossfades;
+    /// black to black (rec <-> mini, action -> rec) stays solid.
     var idleLook: CGFloat {
         let toIdle = pill == .idle, fromIdle = morphFromPill == .idle
         let k: CGFloat = toIdle ? (fromIdle ? 0 : 1 - morphT) : (fromIdle ? morphT : 1)
         return 1 - k
     }
 
-    /// Pill states never touch the card's blur: idle is a faint ring over its
-    /// own sliver of glass (IdleGlassView, below this view), everything else
-    /// is the same black as the notch so the two read as one shape.
+    /// Pill states never touch the card's glass: idle is the capsule of
+    /// IdleGlassView (below this view), everything else is the same black
+    /// as the notch so the two read as one shape. No white ring. The glass
+    /// edge is the outline, and its pixels keep the interior hit-testable.
     private func drawPill() {
         let b = pillRect
         let r = radius
         let capsule = NSBezierPath(roundedRect: b, xRadius: r, yRadius: r)
         let k = 1 - idleLook
         let shown: PillState = pill == .idle ? morphFromPill : pill
-        if k < 1 {
-            // A whisper of white over the glass. The fill also keeps the
-            // interior hit-testable; a fully transparent interior would only
-            // hover on the 1pt ring.
-            NSColor(calibratedWhite: 1, alpha: 0.06 * (1 - k)).setFill(); capsule.fill()
-            let ring = NSBezierPath(roundedRect: b.insetBy(dx: 0.5, dy: 0.5),
-                                    xRadius: r - 0.5, yRadius: r - 0.5)
-            NSColor(calibratedWhite: 1, alpha: 0.16 * (1 - k)).setStroke(); ring.lineWidth = 1; ring.stroke()
-        }
         if k <= 0 || shown == .idle { return }
         capsule.addClip()
         NSColor(white: 0.04, alpha: k).setFill(); b.fill()
@@ -522,73 +526,137 @@ final class HintPanel: NSPanel {
     }
 }
 
+/// Hint under a hovered pill button. Glass plate, no white hairline.
 final class HintBackground: NSView {
-    override func draw(_ rect: NSRect) {
-        // Near-black rounded box with a hairline, like Superwhisper's.
-        let r: CGFloat = 10
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: r, yRadius: r)
-        NSColor(white: 0.05, alpha: 0.94).setFill(); path.fill()
-        NSColor(calibratedWhite: 1, alpha: 0.12).setStroke(); path.lineWidth = 1; path.stroke()
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        let plate = LiquidGlassPlate(frame: bounds)
+        plate.autoresizingMask = [.width, .height]
+        plate.setCornerRadius(10)
+        addSubview(plate)
     }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }
 
-/// Frosted card. maskImage clips the blur; hitTest still uses the square
-/// bounds, so corners would eat clicks on the tabs under a compact pill.
-final class PillEffectView: NSVisualEffectView {
-    let radius: CGFloat = WaveView.radius
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        let path = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
-        if !path.contains(point) { return nil }
-        return super.hitTest(point)
-    }
-}
+/// Speckle tile for the glass. Same idea as Postit's grain: one Retina
+/// pixel per speck, black or white, so it both darkens and lightens.
+/// Fixed seed so a rebuild of the view does not reshuffle the pattern.
+private enum GlassGrain {
+    /// Barely there. Enough to speckle the glass, not enough to flatten
+    /// the rim the way a heavier grain did.
+    static let opacity: Float = 0.07
 
-/// Glass behind the idle capsule, so the outline reads as a sliver of
-/// whatever is behind it instead of a flat grey bar. macOS 26 gets real
-/// glass; older systems a behind-window blur clipped to the same capsule.
-/// Sits under the wave in pill mode only; the wave draws the ring on top.
-final class IdleGlassView: NSView {
-    private let glass: NSView
-    private var maskRadius: CGFloat = -1
-
-    override init(frame: NSRect) {
-        if #available(macOS 26.0, *) {
-            let g = NSGlassEffectView(frame: frame)
-            g.cornerRadius = frame.height / 2
-            glass = g
-        } else {
-            let e = NSVisualEffectView(frame: frame)
-            e.material = .hudWindow
-            e.blendingMode = .behindWindow
-            e.state = .active
-            e.appearance = NSAppearance(named: .vibrantDark)
-            glass = e
+    static let tile: NSImage = {
+        let px = 128
+        var bytes = [UInt8](repeating: 0, count: px * px * 4)
+        var state: UInt64 = 0xA5A5_5A5A_1234_5678
+        for i in 0..<(px * px) {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            let a = UInt8(truncatingIfNeeded: state >> 33)
+            let v: UInt8 = (state & 1) == 0 ? a : 0
+            bytes[i * 4] = v
+            bytes[i * 4 + 1] = v
+            bytes[i * 4 + 2] = v
+            bytes[i * 4 + 3] = a
         }
-        super.init(frame: frame)
+        let cg = bytes.withUnsafeMutableBytes { buf -> CGImage in
+            let ctx = CGContext(data: buf.baseAddress, width: px, height: px,
+                                bitsPerComponent: 8, bytesPerRow: px * 4,
+                                space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            return ctx.makeImage()!
+        }
+        return NSImage(cgImage: cg, size: NSSize(width: px / 2, height: px / 2))
+    }()
+}
+
+/// Grain painted over the glass and under the UI. Clicks fall through.
+private final class GlassGrainView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
         wantsLayer = true
-        glass.frame = bounds
-        glass.autoresizingMask = [.width, .height]
-        addSubview(glass)
+        layer?.backgroundColor = NSColor(patternImage: GlassGrain.tile).cgColor
+        layer?.masksToBounds = true
+        layer?.opacity = GlassGrain.opacity
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// Clicks go to the wave above; the glass is decoration.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
 
+/// The brightness control's material: SwiftUI's regular interactive glass,
+/// which is the SDF rim and refraction, not a tinted blur with a wash on top.
+/// Grain sits over it. The waveform stays a sibling above this plate, because
+/// anything inside the glass gets bent at the edge.
+private struct SystemGlassBody: View {
+    var radius: CGFloat
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            Color.clear
+                .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+        } else {
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .fill(.ultraThinMaterial)
+        }
+    }
+}
+
+/// Hosts the glass. It must not become the drag target: a SwiftUI descendant
+/// is what hit testing returns, and that descendant will not move the window.
+private final class GlassHost: NSHostingView<SystemGlassBody> {
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// Liquid glass plate.
+class LiquidGlassPlate: NSView {
+    private let glass: GlassHost
+    private let grain = GlassGrainView(frame: .zero)
+    private var appliedRadius: CGFloat = -1
+
+    override init(frame frameRect: NSRect) {
+        glass = GlassHost(rootView: SystemGlassBody(radius: 16))
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        glass.frame = bounds
+        glass.autoresizingMask = [.width, .height]
+        glass.safeAreaRegions = []
+        grain.frame = bounds
+        grain.autoresizingMask = [.width, .height]
+        addSubview(glass)
+        addSubview(grain)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) }
+
+    func setCornerRadius(_ radius: CGFloat) {
+        guard radius != appliedRadius else { return }
+        appliedRadius = radius
+        glass.rootView = SystemGlassBody(radius: radius)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        grain.layer?.cornerRadius = radius
+        grain.layer?.cornerCurve = .continuous
+        grain.layer?.masksToBounds = true
+        CATransaction.commit()
+    }
+}
+
+/// Glass behind the idle capsule. Sits under the wave in pill mode only.
+final class IdleGlassView: LiquidGlassPlate {
     /// Follow the live capsule: `look` is WaveView.idleLook, so the glass
     /// fades out as a black state grows over it.
     func follow(shape: NSRect, radius: CGFloat, look: CGFloat) {
         frame = shape
         alphaValue = look
         isHidden = look <= 0
-        guard radius != maskRadius else { return }
-        maskRadius = radius
-        if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView {
-            g.cornerRadius = radius
-        } else if let e = glass as? NSVisualEffectView {
-            e.maskImage = WavePanel.roundedMask(radius: radius)
-        }
+        setCornerRadius(radius)
     }
 }
 
@@ -671,7 +739,7 @@ final class ChevronButton: NSButton {
 
 final class WavePanel: NSPanel {
     let wave = WaveView()
-    private let effect = PillEffectView()
+    private let effect = LiquidGlassPlate(frame: NSRect(origin: .zero, size: WaveView.fullSize))
     private let host = PillHostView()
     private let idleGlass = IdleGlassView(frame: WaveView.pillShape(.idle, mini: false))
     private let chevron = ChevronButton(frame: .zero)
@@ -686,8 +754,29 @@ final class WavePanel: NSPanel {
         set { UserDefaults.standard.set(newValue, forKey: "pillMini") }
     }
 
+    /// The full card drags. The pill stays parked under the menu bar.
+    var cardCanDrag: Bool { !compact }
+
+    func dragCard(with event: NSEvent) {
+        // performWindowDrag no-ops on a nonactivating panel. Track it here.
+        let origin = frame.origin
+        let start = NSEvent.mouseLocation
+        trackEvents(matching: [.leftMouseDragged, .leftMouseUp],
+                    timeout: .greatestFiniteMagnitude, mode: .eventTracking) { [weak self] event, stop in
+            guard let self, let event else { return }
+            if event.type == .leftMouseUp {
+                stop.pointee = true
+                self.rememberCardOrigin()
+                return
+            }
+            let mouse = NSEvent.mouseLocation
+            self.setFrameOrigin(NSPoint(x: origin.x + (mouse.x - start.x),
+                                        y: origin.y + (mouse.y - start.y)))
+        }
+    }
+
     /// True when there is something on screen worth an Esc: the full card,
-    /// or a pill in a take state. The always-on idle outline and the hover
+    /// or a pill in a take state. The always-on idle capsule and the hover
     /// bar are not it, so Esc reaches the app underneath.
     var showsResult: Bool {
         isVisible && !(compact && (wave.pill == .idle || wave.pill == .action))
@@ -714,19 +803,15 @@ final class WavePanel: NSPanel {
         ignoresMouseEvents = false
         hidesOnDeactivate = false   // the settings window can make us active; the card must survive us going inactive again
         isMovableByWindowBackground = true   // grab anywhere on the card and drag
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(cardMoved), name: NSWindow.didMoveNotification, object: self)
         collectionBehavior = Self.hereOnly
 
-        // Frosted-glass card. layer.cornerRadius does not clip the material, so
-        // the blur would fill the window's square and show as a halo outside the
-        // pill. maskImage on the contentView clips the blur and shapes the
-        // window shadow to the same rounded rect.
-        effect.material = .hudWindow
-        effect.blendingMode = .behindWindow
-        effect.state = .active
-        effect.appearance = NSAppearance(named: .vibrantDark)
-        effect.maskImage = Self.roundedMask(radius: WaveView.radius)
-        // The blur is a subview of a clear host rather than the content view
-        // itself so pill mode can hide it (bare outline / solid black) while
+        // Liquid glass under the wave. The plate clips itself to the card
+        // radius; pill mode removes it so the idle capsule can use its own.
+        effect.setCornerRadius(WaveView.radius)
+        // The plate is a subview of a clear host rather than the content view
+        // itself so pill mode can hide it (glass capsule / solid black) while
         // the wave keeps drawing on top.
         host.shape = wave
         contentView = host
@@ -879,7 +964,7 @@ final class WavePanel: NSPanel {
         if compact { transcribing() } else { hide() }
     }
 
-    /// Launch in pill mode: the hairline capsule goes up with nothing running.
+    /// Launch in pill mode: the glass capsule goes up with nothing running.
     func showIdle() {
         guard !recordingActive else { return }
         setCompact(true, animated: false)   // lands on idle: no take is running
@@ -912,7 +997,7 @@ final class WavePanel: NSPanel {
         timer?.invalidate(); timer = nil
         guard isVisible else { return }
         if compact {
-            // The pill never leaves the screen; it shrinks back to the outline.
+            // The pill never leaves the screen; it shrinks back to the glass capsule.
             // Already there (or on the way): nothing to do. The bars keep
             // their last frame through the close; pillSettled resets them.
             if wave.pill == .idle { return }
@@ -962,18 +1047,18 @@ final class WavePanel: NSPanel {
             if !isVisible { bringUp() }
         }
         // Hidden was not enough: a behind-window blur view keeps shaping the
-        // window with its maskImage even when hidden, and that mask was
-        // stretched from a stale radius (pointed, lens-shaped pills). In pill
-        // mode the blur leaves the hierarchy entirely; the wave's own draw
-        // clip is the only shape.
+        // window with its mask even when hidden, and that mask was stretched
+        // from a stale radius (pointed, lens-shaped pills). In pill mode the
+        // card plate leaves the hierarchy entirely; the wave's own draw clip
+        // is the only shape.
         if on {
-            effect.maskImage = nil
             effect.removeFromSuperview()
             if idleGlass.superview == nil { host.addSubview(idleGlass, positioned: .below, relativeTo: wave) }
         } else {
             idleGlass.removeFromSuperview()
             if effect.superview == nil {
                 effect.frame = host.bounds
+                effect.setCornerRadius(WaveView.radius)
                 host.addSubview(effect, positioned: .below, relativeTo: wave)
             }
         }
@@ -1048,7 +1133,7 @@ final class WavePanel: NSPanel {
             return
         }
         let r = WaveView.radius
-        effect.maskImage = Self.roundedMask(radius: r)
+        effect.setCornerRadius(r)
         wave.layer?.cornerRadius = r
     }
 
@@ -1102,7 +1187,7 @@ final class WavePanel: NSPanel {
     }
 
     /// Animate the capsule to `next`. `soft`: the hover-open springs (a
-    /// longer, eased-out glide so the bar grows out of the outline); anything
+    /// longer, eased-out glide so the bar grows out of the glass capsule); anything
     /// else eases in and out.
     private func morph(to next: NSRect, animated: Bool, soft: Bool = false) {
         if animated, isVisible {
@@ -1316,9 +1401,17 @@ final class WavePanel: NSPanel {
             if compact { pillClick(at: wave.convert(event.locationInWindow, from: nil)) }
             return
         }
-        if !compact, abs(frame.height - WaveView.fullSize.height) < 1 {
-            UserDefaults.standard.set(NSStringFromPoint(frame.origin), forKey: "panelOrigin")
-        }
+        rememberCardOrigin()
+    }
+
+    /// A background drag can be eaten by the window before mouseUp arrives.
+    /// didMove covers that, and skips the pill so a take never parks the card
+    /// up under the menu bar.
+    @objc private func cardMoved() { rememberCardOrigin() }
+
+    private func rememberCardOrigin() {
+        guard !compact, abs(frame.height - WaveView.fullSize.height) < 1 else { return }
+        UserDefaults.standard.set(NSStringFromPoint(frame.origin), forKey: "panelOrigin")
     }
 
     private func place() {
@@ -1360,19 +1453,6 @@ final class WavePanel: NSPanel {
             o.y = min(max(o.y, f.minY), max(f.minY, f.maxY - size.height))
         }
         return o
-    }
-
-    /// Stretchable rounded-rect mask. capInsets of `radius` keep the corners
-    /// unscaled so the pill stays circular at any size.
-    static func roundedMask(radius: CGFloat) -> NSImage {
-        let img = NSImage(size: NSSize(width: radius * 2, height: radius * 2), flipped: false) { rect in
-            NSColor.black.set()
-            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-            return true
-        }
-        img.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
-        img.resizingMode = .stretch
-        return img
     }
 
     private static func chevronImage() -> NSImage? {
