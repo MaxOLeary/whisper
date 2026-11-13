@@ -24,3 +24,7 @@ eval/*.log
 
 # Stale sherpa-era eval outputs
 eval/*.jsonl
+
+# Windows tray app local env
+windows/.venv/
+windows/__pycache__/
