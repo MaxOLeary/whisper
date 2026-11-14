@@ -198,7 +198,7 @@ struct HotkeyRecorder: View {
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.primary.opacity(0.08)))
+                        .background(ClearGlass(radius: 5))
                 } else {
                     KeycapsView(hotkey: hotkey)
                 }
@@ -225,7 +225,7 @@ struct KeycapsView: View {
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.primary.opacity(0.08)))
+                    .background(ClearGlass(radius: 5))
             }
         }
     }

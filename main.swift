@@ -368,6 +368,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("com.maxoleary.whisper.openSettings"), object: nil, queue: .main
         ) { [weak self] _ in self?.settings.show(page: .home) }
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.maxoleary.whisper.showCard"), object: nil, queue: .main
+        ) { [weak self] _ in self?.panel.showGlass() }
         capture.onLevel = { [weak self] level in self?.panel.push(level: level) }
         // Notch pill buttons. toggleRecording already picks meeting vs dictation stop.
         panel.onToggleRecord = { [weak self] in self?.toggleRecording() }

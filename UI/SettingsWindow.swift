@@ -90,6 +90,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         w.titleVisibility = .hidden
         w.titlebarAppearsTransparent = true
         w.toolbarStyle = .unified
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.appearance = NSAppearance(named: .darkAqua)
         w.isReleasedWhenClosed = false
         w.standardWindowButton(.zoomButton)?.isHidden = true   // red + yellow only, like the screenshot
         w.setContentSize(NSSize(width: 900, height: 620))
@@ -98,6 +101,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         w.setFrameAutosaveName("SettingsWindow")
         super.init(window: w)
         w.delegate = self
+        if let content = w.contentView {
+            let plate = LiquidGlassPlate(frame: content.bounds)
+            plate.autoresizingMask = [.width, .height]
+            plate.setCornerRadius(16)
+            content.addSubview(plate, positioned: .below, relativeTo: content.subviews.first)
+            host.view.wantsLayer = true
+            host.view.layer?.backgroundColor = NSColor.clear.cgColor
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -149,6 +160,9 @@ struct SettingsRoot: View {
                 }
         }
         .navigationSplitViewStyle(.balanced)
+        .toolbarBackground(.hidden, for: .windowToolbar)
+        .scrollContentBackground(.hidden)
+        .background(Color.clear)
         .frame(minWidth: 720, minHeight: 480)
     }
 
@@ -194,17 +208,27 @@ private struct MicChip: View {
         .foregroundStyle(.primary)
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .modifier(MicChipBackground())
+        .background {
+            GeometryReader { geo in
+                ClearGlass(radius: geo.size.height / 2)
+            }
+        }
     }
 }
 
-private struct MicChipBackground: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.glassEffect(.regular, in: Capsule())
-        } else {
-            content.background(.regularMaterial, in: Capsule())
-        }
+/// The card's plate, as a SwiftUI background. Content stays a sibling, so the
+/// glass does not bend the text.
+struct ClearGlass: NSViewRepresentable {
+    var radius: CGFloat
+
+    func makeNSView(context: Context) -> LiquidGlassPlate {
+        let plate = LiquidGlassPlate(frame: .zero)
+        plate.setCornerRadius(radius)
+        return plate
+    }
+
+    func updateNSView(_ plate: LiquidGlassPlate, context: Context) {
+        plate.setCornerRadius(radius)
     }
 }
 
@@ -259,11 +283,15 @@ struct Sidebar: View {
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
-                .background(Capsule().fill(Color.primary.opacity(0.12)))
+                .background {
+                    GeometryReader { geo in
+                        ClearGlass(radius: geo.size.height / 2)
+                    }
+                }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.primary.opacity(0.06)))
+        .background(ClearGlass(radius: 14))
         .padding(.horizontal, 12)
         .padding(.bottom, 12)
     }
@@ -290,6 +318,8 @@ struct PageScaffold<Content: View>: View {
             .padding(.bottom, 28)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.clear)
     }
 }
 
@@ -299,7 +329,7 @@ struct Placeholder: View {
         Text(text)
             .foregroundStyle(.tertiary)
             .frame(maxWidth: .infinity, minHeight: 120)
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.primary.opacity(0.05)))
+            .background(ClearGlass(radius: 16))
     }
 }
 
@@ -315,7 +345,7 @@ struct SettingsGroup<Content: View>: View {
                 .foregroundStyle(.secondary)
                 .padding(.leading, 4)
             VStack(spacing: 0) { content() }
-                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.primary.opacity(0.05)))
+                .background(ClearGlass(radius: 14))
         }
     }
 }

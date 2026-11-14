@@ -1,6 +1,5 @@
 import AppKit
 import QuartzCore
-import SwiftUI
 
 // MARK: - Floating waveform panel
 
@@ -187,11 +186,8 @@ final class WaveView: NSView {
         // Clip to the pill so tall bars can't paint through the corners
         // and show up as a halo outside the card.
         NSBezierPath(roundedRect: b, xRadius: r, yRadius: r).addClip()
-        // The glass is composited by the window server, so it never lands in
-        // this view's pixels. Below about 10% alpha the window server treats
-        // the card as air and the click never arrives.
-        NSColor.black.withAlphaComponent(0.12).setFill()
-        NSBezierPath(rect: b).fill()
+        // No wash over the plate. The note's glass is the card; a black fill
+        // on top of it is what made this read as a dark slab.
 
         if !compact { drawFooter(rect) }
         drawBars()
@@ -539,112 +535,102 @@ final class HintBackground: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }
 
-/// Speckle tile for the glass. Same idea as Postit's grain: one Retina
-/// pixel per speck, black or white, so it both darkens and lightens.
-/// Fixed seed so a rebuild of the view does not reshuffle the pattern.
-private enum GlassGrain {
-    /// Barely there. Enough to speckle the glass, not enough to flatten
-    /// the rim the way a heavier grain did.
-    static let opacity: Float = 0.07
-
-    static let tile: NSImage = {
-        let px = 128
-        var bytes = [UInt8](repeating: 0, count: px * px * 4)
-        var state: UInt64 = 0xA5A5_5A5A_1234_5678
-        for i in 0..<(px * px) {
-            state = state &* 6364136223846793005 &+ 1442695040888963407
-            let a = UInt8(truncatingIfNeeded: state >> 33)
-            let v: UInt8 = (state & 1) == 0 ? a : 0
-            bytes[i * 4] = v
-            bytes[i * 4 + 1] = v
-            bytes[i * 4 + 2] = v
-            bytes[i * 4 + 3] = a
-        }
-        let cg = bytes.withUnsafeMutableBytes { buf -> CGImage in
-            let ctx = CGContext(data: buf.baseAddress, width: px, height: px,
-                                bitsPerComponent: 8, bytesPerRow: px * 4,
-                                space: CGColorSpaceCreateDeviceRGB(),
-                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-            return ctx.makeImage()!
-        }
-        return NSImage(cgImage: cg, size: NSSize(width: px / 2, height: px / 2))
-    }()
+/// Same plate as the Postit note: NSGlassEffectView, clear, this tint, clipped,
+/// 1pt rim, no grain. The waveform stays a sibling above it, because anything
+/// handed to the glass as contentView gets bent at the edge. Clicks fall
+/// through to the wave, which is what drags the card.
+enum WhisperGlass {
+    static let tint = NSColor(calibratedWhite: 0.16, alpha: 0.18)
+    static let rim = NSColor(calibratedWhite: 1, alpha: 0.10)
 }
 
-/// Grain painted over the glass and under the UI. Clicks fall through.
-private final class GlassGrainView: NSView {
+/// 1pt rim over the glass. Clicks fall through so the wave still drags.
+private final class GlassRimView: NSView {
+    private let rim = CALayer()
+    var radius: CGFloat = 0 { didSet { apply() } }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor(patternImage: GlassGrain.tile).cgColor
-        layer?.masksToBounds = true
-        layer?.opacity = GlassGrain.opacity
+        rim.borderWidth = 1
+        rim.borderColor = WhisperGlass.rim.cgColor
+        rim.cornerCurve = .continuous
+        layer?.addSublayer(rim)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-}
 
-/// The brightness control's material: SwiftUI's regular interactive glass,
-/// which is the SDF rim and refraction, not a tinted blur with a wash on top.
-/// Grain sits over it. The waveform stays a sibling above this plate, because
-/// anything inside the glass gets bent at the edge.
-private struct SystemGlassBody: View {
-    var radius: CGFloat
+    override func layout() {
+        super.layout()
+        apply()
+    }
 
-    var body: some View {
-        if #available(macOS 26.0, *) {
-            Color.clear
-                .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-        } else {
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(.ultraThinMaterial)
-        }
+    private func apply() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        rim.frame = bounds
+        rim.cornerRadius = radius
+        CATransaction.commit()
     }
 }
 
-/// Hosts the glass. It must not become the drag target: a SwiftUI descendant
-/// is what hit testing returns, and that descendant will not move the window.
-private final class GlassHost: NSHostingView<SystemGlassBody> {
-    override var mouseDownCanMoveWindow: Bool { false }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-}
-
-/// Liquid glass plate.
 class LiquidGlassPlate: NSView {
-    private let glass: GlassHost
-    private let grain = GlassGrainView(frame: .zero)
+    private let glass: NSView
+    private let rim = GlassRimView(frame: .zero)
     private var appliedRadius: CGFloat = -1
 
     override init(frame frameRect: NSRect) {
-        glass = GlassHost(rootView: SystemGlassBody(radius: 16))
+        if #available(macOS 26.0, *) {
+            let g = NSGlassEffectView(frame: frameRect)
+            g.style = .clear
+            g.tintColor = WhisperGlass.tint
+            g.wantsLayer = true
+            g.layer?.masksToBounds = true
+            glass = g
+        } else {
+            let v = NSVisualEffectView(frame: frameRect)
+            v.material = .hudWindow
+            v.blendingMode = .behindWindow
+            v.state = .active
+            v.wantsLayer = true
+            v.layer?.masksToBounds = true
+            glass = v
+        }
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
         glass.frame = bounds
         glass.autoresizingMask = [.width, .height]
-        glass.safeAreaRegions = []
-        grain.frame = bounds
-        grain.autoresizingMask = [.width, .height]
+        rim.frame = bounds
+        rim.autoresizingMask = [.width, .height]
         addSubview(glass)
-        addSubview(grain)
+        addSubview(rim)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        glass.frame = bounds
+        if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView, appliedRadius > 0 {
+            g.cornerRadius = appliedRadius
+        }
+        glass.layer?.cornerRadius = appliedRadius > 0 ? appliedRadius : 0
+        glass.layer?.cornerCurve = .continuous
+    }
 
     func setCornerRadius(_ radius: CGFloat) {
         guard radius != appliedRadius else { return }
         appliedRadius = radius
-        glass.rootView = SystemGlassBody(radius: radius)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        grain.layer?.cornerRadius = radius
-        grain.layer?.cornerCurve = .continuous
-        grain.layer?.masksToBounds = true
-        CATransaction.commit()
+        if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView {
+            g.cornerRadius = radius
+        }
+        glass.layer?.cornerRadius = radius
+        glass.layer?.cornerCurve = .continuous
+        rim.radius = radius
     }
 }
 
@@ -798,7 +784,8 @@ final class WavePanel: NSPanel {
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = true
+        hasShadow = false
+        appearance = NSAppearance(named: .darkAqua)
         level = .statusBar
         ignoresMouseEvents = false
         hidesOnDeactivate = false   // the settings window can make us active; the card must survive us going inactive again
@@ -964,6 +951,20 @@ final class WavePanel: NSPanel {
         if compact { transcribing() } else { hide() }
     }
 
+    /// The glass card, on screen, with no take running.
+    func showGlass() {
+        guard !recordingActive else { return }
+        wave.reset()
+        wave.footerDim = false
+        wave.footerLeft = "Whisper"
+        wave.footerRight = []
+        setCompact(false, animated: false)
+        alphaValue = 1
+        wave.needsDisplay = true
+        bringUp()
+        place()
+    }
+
     /// Launch in pill mode: the glass capsule goes up with nothing running.
     func showIdle() {
         guard !recordingActive else { return }
@@ -1065,7 +1066,7 @@ final class WavePanel: NSPanel {
         syncIdleGlass()
         chevron.isHidden = on
         wave.layer?.masksToBounds = !on
-        hasShadow = !on   // pill mode never carries a window shadow (toggling it flickers)
+        hasShadow = false
         applyChrome()
         chevron.toolTip = on ? "Expand" : "Collapse"
         chevron.alphaValue = 0

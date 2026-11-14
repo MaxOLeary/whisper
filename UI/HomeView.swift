@@ -28,6 +28,8 @@ struct HomeView: View {
             .padding(.bottom, 28)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.clear)
         .onAppear { store.refresh() }
     }
 
@@ -133,7 +135,7 @@ struct StatTile: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.primary.opacity(0.05)))
+        .background(ClearGlass(radius: 14))
     }
 }
 

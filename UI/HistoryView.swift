@@ -43,6 +43,8 @@ struct HistoryView: View {
                     .padding(.bottom, 28)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -65,7 +67,7 @@ struct HistoryView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.07)))
+        .background(ClearGlass(radius: 10))
     }
 
     private func empty(_ text: String) -> some View {
@@ -112,7 +114,8 @@ struct TakeCard: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(shape.fill(Color.primary.opacity(hover ? 0.09 : 0.05)))
+        .background(shape.fill(Color.white.opacity(hover ? 0.06 : 0)))
+        .background(ClearGlass(radius: 14))
         .contentShape(shape)
         .onHover { hover = $0 }
         .onTapGesture { copy() }
