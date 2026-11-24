@@ -109,7 +109,9 @@ enum History {
         hotkey.lowercased().split(separator: "+").map { tok -> String in
             switch tok.trimmingCharacters(in: .whitespaces) {
             case "cmd", "command", "meta", "lcmd", "rcmd": return "⌘"
-            case "alt", "opt", "option", "lalt", "ralt", "lopt", "ropt", "loption", "roption": return "⌥"
+            case "ropt", "ralt", "roption": return "R⌥"
+            case "lopt", "lalt", "loption": return "L⌥"
+            case "alt", "opt", "option": return "⌥"
             case "shift", "lshift", "rshift": return "⇧"
             case "ctrl", "control", "lctrl", "rctrl": return "⌃"
             case let k: return k.prefix(1).uppercased() + k.dropFirst()

@@ -44,6 +44,10 @@ struct ConfigurationView: View {
             SettingsRow(title: "Cleanup") {
                 HotkeyRecorder(field: .cleanup, hotkey: store.cleanupHotkey)
             }
+            SettingsDivider()
+            SettingsRow(title: "Paste last") {
+                HotkeyRecorder(field: .pasteLast, hotkey: store.pasteLastHotkey)
+            }
         }
     }
 
@@ -82,8 +86,9 @@ struct ConfigurationView: View {
     private var cleanup: some View {
         SettingsGroup(title: "Cleanup prompt") {
             TextEditor(text: $prompt)
-                .font(.system(size: 13))
+                .font(WhisperType.text(15))
                 .scrollContentBackground(.hidden)
+                .glassScrollKnob()
                 .frame(minHeight: 140)
                 .padding(10)
         }
@@ -198,7 +203,7 @@ struct HotkeyRecorder: View {
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(ClearGlass(radius: 5))
+                        .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.white.opacity(0.08)))
                 } else {
                     KeycapsView(hotkey: hotkey)
                 }
@@ -225,7 +230,7 @@ struct KeycapsView: View {
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(ClearGlass(radius: 5))
+                    .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.white.opacity(0.08)))
             }
         }
     }

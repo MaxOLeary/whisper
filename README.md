@@ -47,6 +47,7 @@ else to install. Everything runs on the Mac, nothing is uploaded.
 |---|---|
 | `⌥ Space` | Start recording. Press again to stop and paste. |
 | `⌘ ⌥ ⇧ Space` | Same, but an LLM tidies punctuation and filler words first. |
+| `R⌥ P` | Pastes the last take. |
 | `Esc` while recording | Closes the card right away and skips the paste. The take is still transcribed and saved to history and `~/Dictation`. |
 
 Change the keys in Settings → Configuration, or in `~/.config/whisper/config.json`.

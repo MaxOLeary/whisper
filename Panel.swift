@@ -536,12 +536,100 @@ final class HintBackground: NSView {
 }
 
 /// Same plate as the Postit note: NSGlassEffectView, clear, this tint, clipped,
-/// 1pt rim, no grain. The waveform stays a sibling above it, because anything
-/// handed to the glass as contentView gets bent at the edge. Clicks fall
-/// through to the wave, which is what drags the card.
+/// 1pt rim. The pill stays free of grain. Settings opts into a little frost
+/// and grain through `setFinish`. The waveform stays a sibling above the
+/// plate, because anything handed to the glass as contentView gets bent at
+/// the edge. Clicks fall through to the wave, which is what drags the card.
 enum WhisperGlass {
     static let tint = NSColor(calibratedWhite: 0.16, alpha: 0.18)
     static let rim = NSColor(calibratedWhite: 1, alpha: 0.10)
+    /// Settings cards. Still clear glass, a step more body than the pill.
+    static let settingsTint = NSColor(calibratedWhite: 0.34, alpha: 0.26)
+    /// Scroll knob. Same glass, pulled toward black.
+    static let knobTint = NSColor(calibratedWhite: 0.02, alpha: 0.70)
+}
+
+/// Speckle field for the settings plates. Transparent, not a black sheet. The pill never draws it.
+private enum GlassGrain {
+    static let image: NSImage = {
+        let side = 96
+        let img = NSImage(size: NSSize(width: side, height: side))
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: side,
+            pixelsHigh: side,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: side * 4,
+            bitsPerPixel: 32
+        ), let raw = rep.bitmapData else { return img }
+        raw.initialize(repeating: 0, count: side * side * 4)
+        var state: UInt32 = 0x00A5C31
+        func next() -> UInt32 {
+            state = state &* 1664525 &+ 1013904223
+            return state
+        }
+        for _ in 0..<900 {
+            let x = Int(next() % UInt32(side))
+            let y = Int(next() % UInt32(side))
+            let i = (y * side + x) * 4
+            let light: UInt8 = (next() & 1) == 0 ? 255 : 0
+            raw[i] = light
+            raw[i + 1] = light
+            raw[i + 2] = light
+            raw[i + 3] = 90 + UInt8(next() % 80)
+        }
+        img.addRepresentation(rep)
+        img.resizingMode = .tile
+        return img
+    }()
+}
+
+/// Frost veil and grain, clipped to the plate. Sits above the glass and under the rim.
+private final class GlassVeil: NSView {
+    var grain: CGFloat = 0
+    var frost: CGFloat = 0
+    var wash: NSColor?
+    var radius: CGFloat = 0 {
+        didSet {
+            layer?.cornerRadius = radius
+            layer?.cornerCurve = .continuous
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        layer?.cornerCurve = .continuous
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        if let wash {
+            ctx.setFillColor(wash.cgColor)
+            ctx.fill(bounds)
+        }
+        if frost > 0 {
+            ctx.setFillColor(NSColor(calibratedWhite: 0.94, alpha: frost).cgColor)
+            ctx.fill(bounds)
+        }
+        if grain > 0 {
+            ctx.saveGState()
+            ctx.setAlpha(grain)
+            NSColor(patternImage: GlassGrain.image).setFill()
+            bounds.fill()
+            ctx.restoreGState()
+        }
+    }
 }
 
 /// 1pt rim over the glass. Clicks fall through so the wave still drags.
@@ -578,6 +666,7 @@ private final class GlassRimView: NSView {
 
 class LiquidGlassPlate: NSView {
     private let glass: NSView
+    private let veil = GlassVeil(frame: .zero)
     private let rim = GlassRimView(frame: .zero)
     private var appliedRadius: CGFloat = -1
 
@@ -586,8 +675,7 @@ class LiquidGlassPlate: NSView {
             let g = NSGlassEffectView(frame: frameRect)
             g.style = .clear
             g.tintColor = WhisperGlass.tint
-            g.wantsLayer = true
-            g.layer?.masksToBounds = true
+            // Do not mask this layer. Clipping the glass shader punches black bands through the plate.
             glass = g
         } else {
             let v = NSVisualEffectView(frame: frameRect)
@@ -602,9 +690,13 @@ class LiquidGlassPlate: NSView {
         wantsLayer = true
         glass.frame = bounds
         glass.autoresizingMask = [.width, .height]
+        veil.frame = bounds
+        veil.autoresizingMask = [.width, .height]
+        veil.isHidden = true
         rim.frame = bounds
         rim.autoresizingMask = [.width, .height]
         addSubview(glass)
+        addSubview(veil)
         addSubview(rim)
     }
 
@@ -615,11 +707,15 @@ class LiquidGlassPlate: NSView {
     override func layout() {
         super.layout()
         glass.frame = bounds
-        if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView, appliedRadius > 0 {
-            g.cornerRadius = appliedRadius
+        veil.frame = bounds
+        let radius = appliedRadius > 0 ? appliedRadius : 0
+        if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView {
+            g.cornerRadius = radius
+        } else {
+            glass.layer?.cornerRadius = radius
+            glass.layer?.cornerCurve = .continuous
         }
-        glass.layer?.cornerRadius = appliedRadius > 0 ? appliedRadius : 0
-        glass.layer?.cornerCurve = .continuous
+        veil.radius = radius
     }
 
     func setCornerRadius(_ radius: CGFloat) {
@@ -627,10 +723,27 @@ class LiquidGlassPlate: NSView {
         appliedRadius = radius
         if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView {
             g.cornerRadius = radius
+        } else {
+            glass.layer?.cornerRadius = radius
+            glass.layer?.cornerCurve = .continuous
         }
-        glass.layer?.cornerRadius = radius
-        glass.layer?.cornerCurve = .continuous
+        veil.radius = radius
         rim.radius = radius
+    }
+
+    /// Settings only. The pill never calls this, so it stays the clear Postit plate.
+    /// `regular` is the softer frosted glass. Clear bends whatever sits near the rim.
+    func setFinish(grain: CGFloat, frost: CGFloat, tint: NSColor, wash: NSColor? = nil, rimAlpha: CGFloat = 1, regular: Bool = false) {
+        veil.grain = grain
+        veil.frost = frost
+        veil.wash = wash
+        veil.isHidden = grain <= 0 && frost <= 0 && wash == nil
+        veil.needsDisplay = true
+        rim.alphaValue = rimAlpha
+        if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView {
+            g.tintColor = tint
+            g.style = regular ? .regular : .clear
+        }
     }
 }
 

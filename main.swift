@@ -37,6 +37,7 @@ struct Config: Codable {
     var hotwordsScore: Double?   // set (e.g. 1) to turn on vocabulary.txt hotwords; nil = off
     var meetingNotesDir: String? // Meeting notes folder; nil = ~/Debrief
     var musicDuringTake: String? // "lower" / "mute" turns the speakers down while dictating; nil = off
+    var pasteLastHotkey: String? // nil or blank = ropt+p
 
     static let dir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/whisper", isDirectory: true)
@@ -48,6 +49,11 @@ struct Config: Codable {
     static let replacementsFile = dir.appendingPathComponent("replacements.txt")
 
     var engineName: String { engine ?? "parakeet" }
+
+    var pasteLastChord: String {
+        let s = pasteLastHotkey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return s.isEmpty ? "ropt+p" : s
+    }
 
     static var defaults: Config {
         Config(
@@ -237,17 +243,25 @@ struct Hotkey {
 
     /// `cmd+alt+space` from a keyDown. Needs cmd, alt, or ctrl, or an F-key, so
     /// a stray letter (or shift+space while typing) never becomes a chord.
+    /// A device bit keeps the side (`ropt` / `lopt`, same for the others).
+    /// No device bit stays generic, so a stored `alt+space` is unchanged.
     /// Nil = keep listening.
     static func string(flags: CGEventFlags, keyCode: Int64) -> String? {
         guard let name = namesByCode[keyCode] else { return nil }
         let hasMod = !flags.intersection([.maskCommand, .maskAlternate, .maskControl]).isEmpty
         let isFn = fnCodes.contains(keyCode)
         guard hasMod || isFn else { return nil }
+        let raw = flags.rawValue
+        func side(_ generic: String, _ left: String, _ right: String, _ lbit: UInt64, _ rbit: UInt64) -> String {
+            if raw & rbit != 0 { return right }
+            if raw & lbit != 0 { return left }
+            return generic
+        }
         var parts: [String] = []
-        if flags.contains(.maskCommand) { parts.append("cmd") }
-        if flags.contains(.maskAlternate) { parts.append("alt") }
-        if flags.contains(.maskShift) { parts.append("shift") }
-        if flags.contains(.maskControl) { parts.append("ctrl") }
+        if flags.contains(.maskCommand) { parts.append(side("cmd", "lcmd", "rcmd", lcmd, rcmd)) }
+        if flags.contains(.maskAlternate) { parts.append(side("alt", "lopt", "ropt", lalt, ralt)) }
+        if flags.contains(.maskShift) { parts.append(side("shift", "lshift", "rshift", lshift, rshift)) }
+        if flags.contains(.maskControl) { parts.append(side("ctrl", "lctrl", "rctrl", lctrl, rctrl)) }
         parts.append(name)
         return parts.joined(separator: "+")
     }
@@ -302,6 +316,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var replacements = Config.loadReplacements()
     var recordHK: Hotkey!
     var cleanupHK: Hotkey!
+    var pasteLastHK: Hotkey?
+    /// When the chord key went up. A swallowed keydown leaves macOS thinking
+    /// the key is still down, so the next press arrives as a repeat and the
+    /// stop (and the paste) never runs. Nil means we have not seen that keyup.
+    var chordKeyUpAt: CFAbsoluteTime?
 
     var statusItem: NSStatusItem!
     var state: RecordState = .idle {
@@ -339,6 +358,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let r = Hotkey.parse(cfg.recordHotkey) else { fatal("Bad recordHotkey in config.json: \(cfg.recordHotkey)") }
         guard let c = Hotkey.parse(cfg.cleanupHotkey) else { fatal("Bad cleanupHotkey in config.json: \(cfg.cleanupHotkey)") }
         recordHK = r; cleanupHK = c
+        pasteLastHK = Hotkey.parse(cfg.pasteLastChord) ?? Hotkey.parse("ropt+p")
         Ducker.restore()   // last run quit mid-take with the speakers turned down
 
         // Transcripts are private: owner-only dir, and log() keeps files 600.
@@ -447,6 +467,30 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         exit(1)
     }
 
+    /// Cleanup first, then every plain chord. The card shows `recordHotkey`
+    /// (Option+Space). Control+Space and Right Option+Space record too.
+    func listeningChords() -> [(Hotkey, Mode)] {
+        var chords: [(Hotkey, Mode)] = [(cleanupHK!, .cleanup)]
+        var plain: [Hotkey] = []
+        func add(_ spec: String) {
+            guard let h = Hotkey.parse(spec) else { return }
+            if plain.contains(where: { $0.flags == h.flags && $0.deviceBits == h.deviceBits && $0.keyCode == h.keyCode }) {
+                return
+            }
+            plain.append(h)
+            chords.append((h, .plain))
+        }
+        add(cfg.recordHotkey)
+        add("ctrl+space")
+        add("ropt+space")
+        return chords
+    }
+
+    func pasteLastHeld(_ key: Int64, _ flags: CGEventFlags) -> Bool {
+        guard let hk = pasteLastHK, hk.keyCode == key else { return false }
+        return hk.modifiersHeld(flags)
+    }
+
     // MARK: Event tap
 
     func installTap() {
@@ -482,26 +526,35 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return handleCapture(field: field, type: type, event: event, flags: flags, key: key)
         }
 
-        let chords: [(Hotkey, Mode)] = [(cleanupHK!, .cleanup), (recordHK!, .plain)]
+        let chords = listeningChords()
         let escape: Int64 = 53
 
         switch state {
         case .idle:
             if type == .keyDown {
-                if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return Unmanaged.passUnretained(event) }
-                // Esc closes a lingering result card early. In pill mode the
-                // window is always up, so only a non-idle pill counts.
-                if key == escape, panel.showsResult {
-                    DispatchQueue.main.async { self.panel.hide() }
+                let repeated = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+                if !repeated {
+                    // Esc closes a lingering result card early. In pill mode the
+                    // window is always up, so only a non-idle pill counts.
+                    if key == escape, panel.showsResult {
+                        DispatchQueue.main.async { self.panel.hide() }
+                        return nil
+                    }
+                    for (hk, mode) in chords where hk.keyCode == key && hk.modifiersHeld(flags) {
+                        chordKeyUpAt = nil
+                        startRecording(mode)
+                        return nil   // swallow so the app underneath never sees it
+                    }
+                }
+                if pasteLastHeld(key, flags) {
+                    if !repeated { DispatchQueue.main.async { self.pasteLastTake() } }
                     return nil
                 }
-                for (hk, mode) in chords where hk.keyCode == key && hk.modifiersHeld(flags) {
-                    startRecording(mode)
-                    return nil   // swallow so the app underneath never sees it
-                }
+                if repeated { return Unmanaged.passUnretained(event) }
             } else if type == .keyUp {
                 // Swallow the matching key-up too, so Finder never sees a full press.
                 for (hk, _) in chords where hk.keyCode == key && hk.modifiersHeld(flags) { return nil }
+                if pasteLastHeld(key, flags) { return nil }
             } else if type == .flagsChanged {
                 for (hk, mode) in chords where hk.keyCode == nil && hk.modifiersHeld(flags) {
                     startRecording(mode)
@@ -514,8 +567,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // closes the card; the take still transcribes.
             // .opening: the mic call is still inside CoreAudio, off this thread.
             // A second tap cancels. It must not wait on that call.
+            if (type == .keyDown || type == .keyUp), pasteLastHeld(key, flags) { return nil }
             if type == .keyDown {
-                if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return nil }
+                // A repeat is the held key, unless we already saw it come up.
+                // Then macOS is still calling the new press a repeat, and that
+                // press is the one that has to stop and paste.
+                let repeated = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+                if repeated {
+                    guard let up = chordKeyUpAt, CFAbsoluteTimeGetCurrent() - up > 0.2 else { return nil }
+                }
                 if key == escape {
                     if case .opening = state { cancelOpening() }
                     else if meetingActive { cancelMeeting() }
@@ -544,7 +604,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else if type == .keyUp {
                 if key == escape { return nil }
                 if meetingActive, Meeting.stopHotkey.keyCode == key { return nil }
-                for (hk, _) in chords where hk.keyCode == key { return nil }
+                // Remember the release and let it through, so the next press
+                // is a real keydown instead of a stuck repeat.
+                if chords.contains(where: { $0.0.keyCode == key }) {
+                    chordKeyUpAt = CFAbsoluteTimeGetCurrent()
+                }
             } else if type == .flagsChanged {
                 if meetingActive, case .recording = state { break }
                 for (hk, _) in chords where hk.keyCode == nil && hk.modifiersHeld(flags) {
@@ -555,6 +619,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .transcribing:
             // Dictation: Esc hides the card; the take still pastes.
             // Meeting: Esc cancels — no transcript, no sticky.
+            if (type == .keyDown || type == .keyUp), pasteLastHeld(key, flags) { return nil }
             if type == .keyDown, key == escape {
                 if meetingActive {
                     cancelMeeting()
@@ -568,7 +633,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return Unmanaged.passUnretained(event)
     }
 
-    /// Swallow the next chord into `recordHotkey` / `cleanupHotkey`. Esc with
+    /// Swallow the next chord into the hotkey being recorded. Esc with
     /// no modifiers cancels. Letters without a modifier stay listening.
     func handleCapture(field: AppStore.HotkeyCapture, type: CGEventType, event: CGEvent,
                        flags: CGEventFlags, key: Int64) -> Unmanaged<CGEvent>? {
@@ -578,12 +643,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.async { self.store.hotkeyCapture = nil }
                 return nil
             }
-            if let s = Hotkey.string(flags: flags, keyCode: key) {
+            if let s = Hotkey.string(flags: flags, keyCode: key), let got = Hotkey.parse(s) {
                 DispatchQueue.main.async {
                     self.store.hotkeyCapture = nil
-                    let other = field == .record ? self.cfg.cleanupHotkey : self.cfg.recordHotkey
-                    guard s != other else { return }
-                    let keyName = field == .record ? "recordHotkey" : "cleanupHotkey"
+                    guard !self.captureConflicts(got, field: field) else { return }
+                    let keyName: String
+                    switch field {
+                    case .record: keyName = "recordHotkey"
+                    case .cleanup: keyName = "cleanupHotkey"
+                    case .pasteLast: keyName = "pasteLastHotkey"
+                    }
                     self.updateConfig([keyName: s])
                 }
                 return nil
@@ -592,6 +661,20 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if type == .keyUp { return nil }
         return Unmanaged.passUnretained(event)
+    }
+
+    /// True when `got` is record, cleanup, paste-last (whichever is not `field`),
+    /// or one of the chords those three are not allowed to take.
+    func captureConflicts(_ got: Hotkey, field: AppStore.HotkeyCapture) -> Bool {
+        func same(_ spec: String) -> Bool {
+            guard let h = Hotkey.parse(spec) else { return false }
+            return h.flags == got.flags && h.deviceBits == got.deviceBits && h.keyCode == got.keyCode
+        }
+        if same("ctrl+space") || same("ropt+space") || same("cmd+alt+space") { return true }
+        if field != .record, same(cfg.recordHotkey) { return true }
+        if field != .cleanup, same(cfg.cleanupHotkey) { return true }
+        if field != .pasteLast, same(cfg.pasteLastChord) { return true }
+        return false
     }
 
     func beginHotkeyCapture(_ field: AppStore.HotkeyCapture) {
@@ -1038,18 +1121,31 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         pb.clearContents()
         pb.setString(text, forType: .string)
-
-        let src = CGEventSource(stateID: .combinedSessionState)
-        let down = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)   // V
-        let up = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
-        down?.flags = .maskCommand; up?.flags = .maskCommand
-        down?.post(tap: .cghidEventTap)
-        up?.post(tap: .cghidEventTap)
+        postCommandV()
 
         clipboardRestore?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.restoreClipboard() }
         clipboardRestore = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    /// ⌘V from a private source, with the tap off so this process can't eat it.
+    /// A session source picks up Control while that key is still down from
+    /// Control+Space, and the focused app then does not paste.
+    private func postCommandV() {
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+        defer { if let tap { CGEvent.tapEnable(tap: tap, enable: true) } }
+        let source = CGEventSource(stateID: .privateState)
+        source?.localEventsSuppressionInterval = 0
+        func post(_ code: CGKeyCode, _ down: Bool, _ flags: CGEventFlags) {
+            guard let e = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { return }
+            e.flags = flags
+            e.post(tap: .cghidEventTap)
+        }
+        post(0x37, true, .maskCommand)   // command
+        post(9, true, .maskCommand)      // V
+        post(9, false, .maskCommand)
+        post(0x37, false, [])
     }
 
     func restoreClipboard() {
@@ -1129,7 +1225,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let b = statusItem.button else { return }
         let (tint, tip): (NSColor?, String)
         switch state {
-        case .idle: (tint, tip) = (nil, "Whisper: press \(cfg.recordHotkey) to dictate")
+        case .idle: (tint, tip) = (nil, "Whisper: press \(History.keycaps(cfg.recordHotkey)) to dictate")
         case .opening: (tint, tip) = (.systemRed, "Opening microphone…")
         case .recording: (tint, tip) = (.systemRed, "Recording…")
         case .transcribing: (tint, tip) = (.systemOrange, "Transcribing…")
@@ -1139,8 +1235,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         b.toolTip = tip
     }
 
-    /// Superwhisper-shaped dropdown: actions, then mic + mode pickers, then
-    /// version and Quit. Transcripts live in the History window now.
+    /// Status menu: record, paste the newest take, settings, then mic and mode.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         // First run: Parakeet is downloading or compiling. Say so up top.
@@ -1159,7 +1254,17 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let toggle = menu.addItem(withTitle: toggleTitle, action: #selector(toggleRecording), keyEquivalent: "")
         toggle.target = self
         if case .transcribing = state { toggle.isEnabled = false }
-        menu.addItem(withTitle: "History…", action: #selector(openHistory), keyEquivalent: "").target = self
+        let last = menu.addItem(withTitle: "Paste Last", action: #selector(pasteMostRecent), keyEquivalent: "")
+        last.target = self
+        if case .idle = state, let text = history.first?.text, !text.isEmpty {
+            last.isEnabled = true
+        } else {
+            last.isEnabled = false
+        }
+        if let app = NSWorkspace.shared.frontmostApplication,
+           app.bundleIdentifier != Bundle.main.bundleIdentifier {
+            menuPasteApp = app
+        }
         menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
         menu.addItem(.separator())
 
@@ -1247,6 +1352,35 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .transcribing: break
         }
     }
+    /// App that was in front when the status menu opened, so Paste Last
+    /// goes back there instead of into this menu bar app.
+    var menuPasteApp: NSRunningApplication?
+
+    @objc func pasteMostRecent() {
+        guard case .idle = state, let text = history.first?.text, !text.isEmpty else { return }
+        let target = menuPasteApp
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self else { return }
+            if let target, target.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                target.activate()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { self.paste(text) }
+        }
+    }
+
+    func pasteLastTake() {
+        guard case .idle = state, let text = history.first?.text, !text.isEmpty else { return }
+        let me = ProcessInfo.processInfo.processIdentifier
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != me {
+            paste(text)
+            return
+        }
+        settings.rememberedApp()?.activate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.paste(text)
+        }
+    }
+
     @objc func openHistory() { settings.show(page: .history) }
     @objc func openSettings() { settings.show(page: .home) }
 
@@ -1265,6 +1399,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         parakeet.latinOnly = ParakeetEngine.usesLatinScript(cfg.language)
         if let r = Hotkey.parse(cfg.recordHotkey) { recordHK = r }
         if let c = Hotkey.parse(cfg.cleanupHotkey) { cleanupHK = c }
+        pasteLastHK = Hotkey.parse(cfg.pasteLastChord) ?? Hotkey.parse("ropt+p")
         panel.recordHotkey = cfg.recordHotkey
         refreshIcon()
         syncStore()
@@ -1283,6 +1418,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         store.micSymbol = symbol
         store.recordHotkey = cfg.recordHotkey
         store.cleanupHotkey = cfg.cleanupHotkey
+        store.pasteLastHotkey = cfg.pasteLastChord
         store.audioDevice = cfg.audioDevice
         store.language = cfg.language
         store.minSeconds = cfg.minSeconds
@@ -1418,6 +1554,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         replacements = Config.loadReplacements()
         if let r = Hotkey.parse(cfg.recordHotkey) { recordHK = r }
         if let c = Hotkey.parse(cfg.cleanupHotkey) { cleanupHK = c }
+        pasteLastHK = Hotkey.parse(cfg.pasteLastChord) ?? Hotkey.parse("ropt+p")
         refreshIcon()
         syncStore()
         if checkModel(quiet: true) { startEngine() }

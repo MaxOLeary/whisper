@@ -6,7 +6,7 @@ import SwiftUI
 /// `App` (main.swift) writes to this on the main thread; views only read it
 /// and call back through the closures. Keeps SwiftUI out of the pipeline.
 final class AppStore: ObservableObject {
-    enum HotkeyCapture { case record, cleanup }
+    enum HotkeyCapture { case record, cleanup, pasteLast }
 
     @Published var state: RecordState = .idle
     @Published var page: Page = .home
@@ -14,6 +14,7 @@ final class AppStore: ObservableObject {
     @Published var micSymbol = "laptopcomputer"
     @Published var recordHotkey = "alt+space"
     @Published var cleanupHotkey = "cmd+alt+shift+space"
+    @Published var pasteLastHotkey = "ropt+p"
     @Published var audioDevice = ""
     @Published var mics: [String] = []
     @Published var language = "en"
@@ -73,6 +74,39 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
 
 // MARK: - Window
 
+/// AppKit puts the traffic lights in the window corner after every layout.
+/// This window puts them back inside the sidebar plate, off the fillet.
+final class SettingsChromeWindow: NSWindow {
+    private var placing = false
+
+    override func layoutIfNeeded() {
+        super.layoutIfNeeded()
+        guard !placing else { return }
+        placing = true
+        insetTrafficLights()
+        placing = false
+    }
+
+    func insetTrafficLights() {
+        guard let close = standardWindowButton(.closeButton),
+              let mini = standardWindowButton(.miniaturizeButton),
+              let box = close.superview else { return }
+        standardWindowButton(.zoomButton)?.isHidden = true
+        let left: CGFloat = 28
+        let top: CGFloat = 20
+        let gap: CGFloat = 8
+        let y = box.bounds.height - top - close.frame.height
+        let closeAt = NSPoint(x: left, y: y)
+        let miniAt = NSPoint(x: left + close.frame.width + gap, y: y)
+        if abs(close.frame.origin.x - closeAt.x) > 0.5 || abs(close.frame.origin.y - closeAt.y) > 0.5 {
+            close.setFrameOrigin(closeAt)
+        }
+        if abs(mini.frame.origin.x - miniAt.x) > 0.5 || abs(mini.frame.origin.y - miniAt.y) > 0.5 {
+            mini.setFrameOrigin(miniAt)
+        }
+    }
+}
+
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let store: AppStore
     /// Whoever was in front when the window opened. Opening the window makes
@@ -84,14 +118,19 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     init(store: AppStore) {
         self.store = store
         let host = NSHostingController(rootView: SettingsRoot().environmentObject(store))
-        let w = NSWindow(contentViewController: host)
+        // The host stays the content view. A glass container around it lifts
+        // the plates over the type and the lens smears every label.
+        let w = SettingsChromeWindow(contentViewController: host)
         w.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-        w.title = "Whisper"
+        w.title = ""
         w.titleVisibility = .hidden
         w.titlebarAppearsTransparent = true
         w.toolbarStyle = .unified
         w.isOpaque = false
         w.backgroundColor = .clear
+        w.hasShadow = false
+        w.titlebarSeparatorStyle = .none
+        w.isMovableByWindowBackground = true
         w.appearance = NSAppearance(named: .darkAqua)
         w.isReleasedWhenClosed = false
         w.standardWindowButton(.zoomButton)?.isHidden = true   // red + yellow only, like the screenshot
@@ -101,14 +140,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         w.setFrameAutosaveName("SettingsWindow")
         super.init(window: w)
         w.delegate = self
-        if let content = w.contentView {
-            let plate = LiquidGlassPlate(frame: content.bounds)
-            plate.autoresizingMask = [.width, .height]
-            plate.setCornerRadius(16)
-            content.addSubview(plate, positioned: .below, relativeTo: content.subviews.first)
-            host.view.wantsLayer = true
-            host.view.layer?.backgroundColor = NSColor.clear.cgColor
-        }
+        // No full-window plate. A plate is an edge, and the point is that the
+        // desktop shows through between the floating pieces.
+        host.view.wantsLayer = true
+        host.view.layer?.backgroundColor = NSColor.clear.cgColor
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -126,10 +161,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     /// App that was in front when this window opened, if it is still not us.
+    func rememberedApp() -> NSRunningApplication? {
+        guard let prev = previousApp,
+              prev.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
+        return prev
+    }
+
     /// Used as the stats `app` when Whisper itself is frontmost at paste time.
     func recordedAppName() -> String {
-        guard let prev = previousApp,
-              prev.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return "" }
+        guard let prev = rememberedApp() else { return "" }
         return prev.localizedName ?? prev.bundleIdentifier ?? ""
     }
 
@@ -140,6 +180,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         if !NSApp.isActive { previousApp = NSWorkspace.shared.frontmostApplication }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        (window as? SettingsChromeWindow)?.insetTrafficLights()
     }
 }
 
@@ -149,17 +190,20 @@ struct SettingsRoot: View {
     @EnvironmentObject var store: AppStore
 
     var body: some View {
-        NavigationSplitView {
+        HStack(alignment: .top, spacing: 14) {
             Sidebar()
-                .navigationSplitViewColumnWidth(min: 200, ideal: 224, max: 260)
-        } detail: {
+                .frame(width: 220)
+                .frame(maxHeight: .infinity)
             page(store.page)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .toolbar {
-                    micToolbar
-                }
+                .background(ClearGlass(radius: 22))
         }
-        .navigationSplitViewStyle(.balanced)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 16)
+        .padding(.top, 10)
+        .ignoresSafeArea()
+        .font(WhisperType.text(14))
+        .toolbar { micToolbar }
         .toolbarBackground(.hidden, for: .windowToolbar)
         .scrollContentBackground(.hidden)
         .background(Color.clear)
@@ -204,10 +248,10 @@ private struct MicChip: View {
                 .lineLimit(1)
             Image(systemName: symbol)
         }
-        .font(.system(size: 13))
+        .font(WhisperType.text(14))
         .foregroundStyle(.primary)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
         .background {
             GeometryReader { geo in
                 ClearGlass(radius: geo.size.height / 2)
@@ -216,84 +260,177 @@ private struct MicChip: View {
     }
 }
 
+/// Libron for the words you read. Small captions stay the system face.
+enum WhisperType {
+    static func text(_ size: CGFloat, bold: Bool = false) -> Font {
+        .custom(bold ? "Libron-Bold" : "Libron-Regular", size: size)
+    }
+}
+
 /// The card's plate, as a SwiftUI background. Content stays a sibling, so the
-/// glass does not bend the text.
+/// glass does not bend the text. A little frost and grain, still clear.
 struct ClearGlass: NSViewRepresentable {
     var radius: CGFloat
+    var tint: NSColor = WhisperGlass.settingsTint
+    var grain: CGFloat = 0.22
+    var frost: CGFloat = 0.09
+    var wash: NSColor? = nil
+    var rimAlpha: CGFloat = 1
+    var regular: Bool = false
 
     func makeNSView(context: Context) -> LiquidGlassPlate {
         let plate = LiquidGlassPlate(frame: .zero)
         plate.setCornerRadius(radius)
+        plate.setFinish(grain: grain, frost: frost, tint: tint, wash: wash, rimAlpha: rimAlpha, regular: regular)
         return plate
     }
 
     func updateNSView(_ plate: LiquidGlassPlate, context: Context) {
         plate.setCornerRadius(radius)
+        plate.setFinish(grain: grain, frost: frost, tint: tint, wash: wash, rimAlpha: rimAlpha, regular: regular)
     }
 }
 
 struct Sidebar: View {
     @EnvironmentObject var store: AppStore
+    @State private var hover: Page?
 
     var body: some View {
-        List(selection: $store.page) {
-            Section {
-                row(.home)
-            }
-            Section {
-                row(.configuration)
-                row(.sound)
-            }
-            Section {
-                row(.history)
-            }
-        }
-        .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
-        .safeAreaInset(edge: .bottom) {
+        VStack(alignment: .leading, spacing: 2) {
+            Color.clear.frame(height: 40)
+            row(.home)
+            row(.configuration)
+            row(.sound)
+            row(.history)
+            Spacer(minLength: 12)
             footer
         }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
+        .padding(.top, 6)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(ClearGlass(radius: 22))
     }
 
     private func row(_ p: Page) -> some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(p.tint)
-                    .frame(width: 28, height: 28)
-                Image(systemName: p.symbol)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
+        let on = store.page == p
+        return Button {
+            store.page = p
+        } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(p.tint)
+                        .frame(width: 28, height: 28)
+                    Image(systemName: p.symbol)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                Text(p.title)
+                    .font(WhisperType.text(16))
+                    .foregroundStyle(on ? Color.white : Color.primary)
+                Spacer(minLength: 0)
             }
-            Text(p.title)
-                .font(.system(size: 15, weight: .medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(on ? Color.accentColor : (hover == p ? Color.white.opacity(0.06) : Color.clear))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .padding(.vertical, 5)
-        .tag(p)
+        .buttonStyle(.plain)
+        .onHover { inside in hover = inside ? p : (hover == p ? nil : hover) }
     }
 
     /// "Whisper  1.0" pill at the bottom, where the screenshot has its name + PRO.
     private var footer: some View {
         HStack(spacing: 8) {
             Text("Whisper")
-                .font(.system(size: 15, weight: .semibold))
+                .font(WhisperType.text(16, bold: true))
                 .foregroundStyle(.secondary)
             Text(App.version)
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
-                .background {
-                    GeometryReader { geo in
-                        ClearGlass(radius: geo.size.height / 2)
-                    }
-                }
+                .background(Capsule().fill(Color.white.opacity(0.08)))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
-        .background(ClearGlass(radius: 14))
-        .padding(.horizontal, 12)
-        .padding(.bottom, 12)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.06)))
+    }
+}
+
+/// Finds the enclosing scroll view and swaps in the glass knob.
+private struct GlassScrollerInstaller: NSViewRepresentable {
+    func makeNSView(context: Context) -> GlassScrollerInstallerView { GlassScrollerInstallerView() }
+    func updateNSView(_ view: GlassScrollerInstallerView, context: Context) { view.install() }
+}
+
+private final class GlassScrollerInstallerView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        install()
+    }
+
+    func install() {
+        guard let scroll = enclosingScrollView else { return }
+        if scroll.scrollerStyle != .overlay { scroll.scrollerStyle = .overlay }
+        if scroll.autohidesScrollers { scroll.autohidesScrollers = false }
+        scroll.hasHorizontalScroller = false
+        if !(scroll.verticalScroller is GlassScroller) {
+            scroll.verticalScroller = GlassScroller(frame: scroll.verticalScroller?.frame ?? .zero)
+        }
+    }
+}
+
+/// Dark capsule. Drawn in `drawKnob` so a live glass view is not moved on every scroll tick.
+private final class GlassScroller: NSScroller {
+    override class var isCompatibleWithOverlayScrollers: Bool { true }
+
+    override class func scrollerWidth(for controlSize: NSControl.ControlSize, scrollerStyle: NSScroller.Style) -> CGFloat {
+        scrollerStyle == .overlay ? 18 : super.scrollerWidth(for: controlSize, scrollerStyle: scrollerStyle)
+    }
+
+    override func drawKnobSlot(in slotRect: NSRect, highlight: Bool) {}
+
+    override func drawKnob() {
+        let slot = rect(for: .knobSlot)
+        let knob = rect(for: .knob)
+        guard knob.height > 1, slot.height > 1, knob.height < slot.height - 2 else { return }
+        let width = min(14, max(slot.width - 3, 10))
+        var height = max(knob.height + 18, 48)
+        height = min(height, slot.height - 4)
+        var y = knob.midY - height / 2
+        y = min(max(y, slot.minY + 2), slot.maxY - height - 2)
+        let rect = NSRect(x: slot.midX - width / 2, y: y, width: width, height: height)
+        let path = NSBezierPath(roundedRect: rect, xRadius: width / 2, yRadius: width / 2)
+        NSColor(calibratedWhite: 0.02, alpha: 0.78).setFill()
+        path.fill()
+        NSColor(calibratedWhite: 1, alpha: 0.16).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+}
+
+extension View {
+    /// Put this on scroll content so the installer sits inside the scroll view.
+    func glassScrollKnob() -> some View {
+        background(GlassScrollerInstaller())
+    }
+
+    /// Content dissolves at the viewport instead of being sliced by a hard edge.
+    func softScrollEdges() -> some View {
+        mask {
+            VStack(spacing: 0) {
+                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 28)
+                Rectangle().fill(Color.black)
+                LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 40)
+            }
+        }
     }
 }
 
@@ -306,19 +443,23 @@ struct PageScaffold<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text(title)
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(WhisperType.text(22, bold: true))
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 28)
+                .padding(.top, 48)
+            ScrollView {
                 content()
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 28)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .glassScrollKnob()
             }
-            .padding(.horizontal, 28)
-            .padding(.top, 18)
-            .padding(.bottom, 28)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .scrollContentBackground(.hidden)
+            .scrollIndicators(.visible)
+            .softScrollEdges()
         }
-        .scrollContentBackground(.hidden)
         .background(Color.clear)
     }
 }
@@ -329,7 +470,7 @@ struct Placeholder: View {
         Text(text)
             .foregroundStyle(.tertiary)
             .frame(maxWidth: .infinity, minHeight: 120)
-            .background(ClearGlass(radius: 16))
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.06)))
     }
 }
 
@@ -345,7 +486,7 @@ struct SettingsGroup<Content: View>: View {
                 .foregroundStyle(.secondary)
                 .padding(.leading, 4)
             VStack(spacing: 0) { content() }
-                .background(ClearGlass(radius: 14))
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.06)))
         }
     }
 }
@@ -359,7 +500,7 @@ struct SettingsRow<Trailing: View>: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 14))
+                    .font(WhisperType.text(15))
                 if let subtitle {
                     Text(subtitle)
                         .font(.system(size: 12))

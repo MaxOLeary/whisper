@@ -16,9 +16,15 @@ struct HistoryView: View {
     var body: some View {
         let groups = self.groups
         return VStack(spacing: 0) {
+            Text("History")
+                .font(WhisperType.text(22, bold: true))
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 28)
+                .padding(.top, 48)
+                .padding(.bottom, 12)
             searchField
                 .padding(.horizontal, 28)
-                .padding(.top, 18)
                 .padding(.bottom, 10)
             if store.history.isEmpty {
                 empty("No takes yet. Press \(History.keycaps(store.recordHotkey)) to dictate.")
@@ -42,8 +48,10 @@ struct HistoryView: View {
                     .padding(.horizontal, 28)
                     .padding(.bottom, 28)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .glassScrollKnob()
                 }
                 .scrollContentBackground(.hidden)
+                .softScrollEdges()
                 .background(Color.clear)
             }
         }
@@ -57,7 +65,7 @@ struct HistoryView: View {
                 .foregroundStyle(.secondary)
             TextField("Search", text: $query)
                 .textFieldStyle(.plain)
-                .font(.system(size: 15))
+                .font(WhisperType.text(16))
             if !query.isEmpty {
                 Button { query = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
@@ -67,12 +75,12 @@ struct HistoryView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(ClearGlass(radius: 10))
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.white.opacity(0.06)))
     }
 
     private func empty(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 15))
+            .font(WhisperType.text(16))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -92,7 +100,7 @@ struct TakeCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Text(take.text)
-                .font(.system(size: 14))
+                .font(WhisperType.text(15))
                 .lineLimit(2)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -114,8 +122,7 @@ struct TakeCard: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(shape.fill(Color.white.opacity(hover ? 0.06 : 0)))
-        .background(ClearGlass(radius: 14))
+        .background(shape.fill(Color.white.opacity(hover ? 0.10 : 0.06)))
         .contentShape(shape)
         .onHover { hover = $0 }
         .onTapGesture { copy() }

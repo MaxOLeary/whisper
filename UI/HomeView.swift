@@ -17,18 +17,15 @@ struct HomeView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                rangeMenu
-                tiles
-                getStarted
-            }
-            .padding(.horizontal, 28)
-            .padding(.top, 18)
-            .padding(.bottom, 28)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 20) {
+            rangeMenu
+            tiles
+            startRecording
         }
-        .scrollContentBackground(.hidden)
+        .padding(.horizontal, 28)
+        .padding(.top, 48)
+        .padding(.bottom, 28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
         .onAppear { store.refresh() }
     }
@@ -42,12 +39,12 @@ struct HomeView: View {
         } label: {
             HStack(spacing: 6) {
                 Text(range.title)
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(WhisperType.text(22, bold: true))
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.primary)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -61,7 +58,7 @@ struct HomeView: View {
             StatTile(title: "Average speed", value: "\(s.averageSpeed)", unit: "wpm",
                      symbol: "bolt.fill", tint: Color(red: 0.98, green: 0.45, blue: 0.20))
             StatTile(title: "Words", value: s.words.formatted(), unit: nil,
-                     symbol: "text.alignleft", tint: Color(red: 0.20, green: 0.55, blue: 0.95))
+                     symbol: "textformat.abc", tint: Color(red: 0.20, green: 0.55, blue: 0.95))
             StatTile(title: "Apps used", value: "\(s.appsUsed)", unit: nil,
                      symbol: "square.grid.2x2.fill", tint: Color(red: 0.55, green: 0.40, blue: 0.95))
             StatTile(title: "Time saved", value: Stats.formatTimeSaved(minutes: s.timeSavedMinutes), unit: nil,
@@ -69,35 +66,18 @@ struct HomeView: View {
         }
     }
 
-    private var getStarted: some View {
-        SettingsGroup(title: "Get started") {
-            Button {
-                store.toggleRecording()
-            } label: {
-                GetStartedRow(title: "Start recording", symbol: "mic.fill", tint: Page.home.tint) {
-                    KeycapsView(hotkey: store.recordHotkey)
-                }
-            }
-            .buttonStyle(.plain)
-            .disabled(isTranscribing)
-            SettingsDivider()
-            navRow("Customize your shortcuts", page: .configuration)
-            SettingsDivider()
-            navRow("Pick your sounds", page: .sound)
-            SettingsDivider()
-            navRow("Browse your history", page: .history)
-        }
-    }
-
-    private func navRow(_ title: String, page: Page) -> some View {
-        Button { store.page = page } label: {
-            GetStartedRow(title: title, symbol: page.symbol, tint: page.tint) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.tertiary)
+    /// The other pages already live in the sidebar. Home only offers the hotkey.
+    private var startRecording: some View {
+        Button {
+            store.toggleRecording()
+        } label: {
+            GetStartedRow(title: "Start recording", symbol: "mic.fill", tint: Page.home.tint) {
+                KeycapsView(hotkey: store.recordHotkey)
             }
         }
         .buttonStyle(.plain)
+        .disabled(isTranscribing)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.06)))
     }
 }
 
@@ -125,7 +105,7 @@ struct StatTile: View {
             }
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(value)
-                    .font(.system(size: 28, weight: .semibold, design: .rounded))
+                    .font(WhisperType.text(30, bold: true))
                 if let unit {
                     Text(unit)
                         .font(.system(size: 13, weight: .medium))
@@ -135,7 +115,7 @@ struct StatTile: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(ClearGlass(radius: 14))
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.06)))
     }
 }
 
@@ -157,7 +137,7 @@ struct GetStartedRow<Trailing: View>: View {
                     .foregroundStyle(.white)
             }
             Text(title)
-                .font(.system(size: 14))
+                .font(WhisperType.text(15))
                 .foregroundStyle(.primary)
             Spacer(minLength: 12)
             trailing()

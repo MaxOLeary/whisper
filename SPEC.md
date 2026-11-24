@@ -123,3 +123,35 @@ Verification (how we will know each stage worked):
 - 2. App running with pill mode on: a faint outline sits top-center with nothing else showing. Hover: black bar with gear / bars / expand; mouse away: outline again. Click bars: Tink, red disc + moving ticker, no focus change in Ghostty. Click the ticker: shrinks to six bars; click again: grows. Click the disc: Pop, disc goes grey while transcribing, text pastes, pill fades back to the outline. Hotkey start/stop and Esc do the same things. Expand: the full 428x120 card at its old spot; chevron-up on the card: back to the outline. Quit and relaunch: pill comes back in the state it was left in. Debrief meeting: same pill, disc click ends the meeting.
 
 Current stage: done (built + installed 2026-09-16; second pass same day: smaller pills, top inset, instant hover close, hover hints; third pass 2026-09-17: fixed-size 132x48 pill window with the capsule animated inside it via CADisplayLink, spring open, hover-delayed Superwhisper-style hint, idle 44x8, action/rec 116 wide, hint dismissed on expand/take; fourth pass 2026-09-18: `pinToAllSpaces()` clears and re-sets `.canJoinAllSpaces` on every show and after a card drag, because the window server had dropped the tag and pinned the card to one Space, and re-assigning the unchanged value never reached it, so the card was invisible on every other desktop while dictation kept working)
+
+---
+
+# Paste Last hotkey
+
+Goal:
+A global chord pastes the newest take in `~/Dictation` into the app that has focus. Same text the status menu's Paste Last item pastes. The chord is right Option+P, stored as `ropt+p`. Left Option+P still types π. Changeable on Configuration next to Record and Cleanup. Max set this chord on 2026-11-24.
+
+Out of scope:
+- Rewriting `~/.config/whisper/config.json`. The new key is optional. A missing key means the default. `Config.load()` overwrites the file when decode fails, so a required new field would wipe the live config.
+- A second history browser, or pasting any take other than the newest.
+- Windows (`windows/app.py`).
+- Changing record (`alt+space`, plus the hardcoded `ctrl+space` and `ropt+space`), cleanup (`cmd+alt+shift+space`), or meeting stop (`cmd+alt+space`).
+
+Architecture (short):
+The event tap already swallows record and cleanup. Add `pasteLastHotkey: String?` on `Config` (nil or blank = `ropt+p`). A bad value falls back to `ropt+p` and does not call `fatal`. Parse it once next to `recordHK` / `cleanupHK` and again in `updateConfig`. `Hotkey.parse("ropt+p")` already sets `.maskAlternate` plus the right-Option device bit (`0x40`), so left Option does not match. On keyDown while `state == .idle`, after the record chords miss, if this chord matches, swallow it (including auto-repeat and the matching keyUp). If `history.first` has text, call `paste(_:)`. Do not call `pasteMostRecent()`: that waits and activates `menuPasteApp`, which is only set when the status menu opens. If Whisper is frontmost, activate the app that was in front when Settings opened (add a method; `previousApp` stays private), then paste on the next turn so ⌘V does not land in a settings field. Empty history: swallow and do nothing. While opening, recording, or transcribing: swallow the chord and do nothing, so it does not stop a take and does not type π. Do not add it to `listeningChords()`. The status menu item stays "Paste Last" with no key equivalent. AppKit cannot show a right-Option-only equivalent, and a plain ⌥P equivalent would also claim left Option.
+
+`Hotkey.string` must keep the side: if the right-Option device bit is set, emit `ropt` instead of `alt` (left bit emits `lopt`). Otherwise re-recording Right Option+P would save `alt+p` and start matching both sides. Existing `alt+space` in config is unchanged.
+
+Hotkey capture: `AppStore.HotkeyCapture` gains `pasteLast`. The recorder rejects a chord equal to record, cleanup, the other of those, `ctrl+space`, `ropt+space`, or `cmd+alt+space`. Saving writes only `pasteLastHotkey` through `Config.save(patch:)`.
+
+Keycaps: `History.keycaps` renders `ropt` / `ralt` / `roption` as `R⌥` and the left tokens as `L⌥`, with no space inside the token (the settings chips split on spaces). Generic `alt` stays `⌥`. Do not change `Panel.keycaps`.
+
+Files: `main.swift`, `UI/SettingsWindow.swift`, `UI/ConfigurationView.swift`, `History.swift` (keycaps only), `README.md` hotkey table. One row: `R⌥ P` pastes the last take.
+
+Stages:
+- [x] 1. Wire the chord end to end: config field and default, tap match, capture field, Configuration row, menu key equivalent, README row. `./build.sh`. Do not write `~/.config/whisper/config.json` by hand. Before `swift build`, `touch` every source edited in this stage if its mtime is behind `.build`.
+
+Verification (how we will know each stage worked):
+- 1. `./build.sh` exits 0. `strings` on the new binary contains `pasteLastHotkey` and `ropt+p`. Reading the diff: `Config.load()` still decodes a config.json that has no `pasteLastHotkey`. Record, cleanup, Control+Space, and Right Option+Space are unchanged. A real check after install: with a take in history, Right Option+P in Ghostty pastes that take and the old clipboard comes back; Left Option+P still types π; the same chord during a recording does not stop it and does not type into Ghostty; the menu item still pastes.
+
+Current stage: done. Installed 2026-11-24, not pushed. Chord is right Option+P (`ropt+p`). Binary has `pasteLastTake` / `pasteLastChord`. The literal `ropt+p` is a Swift small string, so `strings` does not show it. Key press not watched from here.

@@ -29,6 +29,7 @@ let package = Package(
                 "VERSION",
                 "entitlements.plist",
                 "RELEASE.md",
+                "fonts",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)

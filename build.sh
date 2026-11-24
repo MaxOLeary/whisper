@@ -25,8 +25,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$REL/Whisper" "$BIN"
 
-mkdir -p "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/Resources/Fonts"
 cp icon/Whisper.icns "$APP/Contents/Resources/"
+cp fonts/*.ttf fonts/OFL.txt "$APP/Contents/Resources/Fonts/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -44,6 +45,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key> <true/>
     <key>LSUIElement</key>             <true/>
     <key>CFBundleIconFile</key>         <string>Whisper</string>
+    <key>ATSApplicationFontsPath</key>  <string>Fonts</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Whisper records your voice while you hold the hotkey so it can transcribe it locally.</string>
 </dict>
